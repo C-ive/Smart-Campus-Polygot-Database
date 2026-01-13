@@ -1,0 +1,8 @@
+﻿sensor_id	UInt32					
+room_id	UInt32					
+sensor_type	LowCardinality(String)					
+hour	DateTime(\'UTC\')					
+avg_state	AggregateFunction(avg, Float64)					
+min_state	AggregateFunction(min, Float64)					
+max_state	AggregateFunction(max, Float64)					
+cnt_state	AggregateFunction(count, UInt64)					

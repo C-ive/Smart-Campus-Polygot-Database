@@ -1,0 +1,7 @@
+﻿id, name, type, entityType, labelsOrTypes, properties, ownedIndex, propertyType
+8, "course_code_unique", "UNIQUENESS", "NODE", ["Course"], ["course_code"], "course_code_unique", NULL
+10, "dept_name_unique", "UNIQUENESS", "NODE", ["Department"], ["name"], "dept_name_unique", NULL
+12, "lecturer_id_unique", "UNIQUENESS", "NODE", ["Lecturer"], ["lecturer_id"], "lecturer_id_unique", NULL
+14, "material_id_unique", "UNIQUENESS", "NODE", ["Material"], ["material_id"], "material_id_unique", NULL
+4, "student_id_unique", "UNIQUENESS", "NODE", ["Student"], ["student_id"], "student_id_unique", NULL
+6, "student_reg_unique", "UNIQUENESS", "NODE", ["Student"], ["reg_no"], "student_reg_unique", NULL

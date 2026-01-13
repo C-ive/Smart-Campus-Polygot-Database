@@ -1,0 +1,17 @@
+﻿*************************** 1. row ***************************
+       Table: activity_logs
+Create Table: CREATE TABLE `activity_logs` (
+  `id` bigint unsigned NOT NULL AUTO_INCREMENT,
+  `student_id` int unsigned NOT NULL,
+  `activity_type` varchar(30) NOT NULL,
+  `resource_id` bigint unsigned DEFAULT NULL,
+  `timestamp` datetime(3) NOT NULL,
+  `session_duration` int unsigned NOT NULL DEFAULT '0',
+  `ip_address` varchar(45) NOT NULL,
+  PRIMARY KEY (`id`),
+  KEY `fk_activity_student` (`student_id`),
+  CONSTRAINT `fk_activity_student` FOREIGN KEY (`student_id`) REFERENCES `students` (`student_id`) ON DELETE RESTRICT ON UPDATE CASCADE,
+  CONSTRAINT `chk_activity_type` CHECK ((`activity_type` in (_latin1'login',_latin1'logout',_latin1'view_material',_latin1'download_material',_latin1'watch_video',_latin1'attempt_quiz',_latin1'submit_assignment',_latin1'forum_post',_latin1'message'))),
+  CONSTRAINT `chk_ip_not_empty` CHECK ((char_length(`ip_address`) >= 7)),
+  CONSTRAINT `chk_session_duration` CHECK ((`session_duration` >= 0))
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci

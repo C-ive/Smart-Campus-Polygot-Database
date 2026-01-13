@@ -1,0 +1,57 @@
+﻿=== C2 TRANSACTION DEMO START ===
+Using course_id=31 course_code=TXN501
+Using students: 1 (AIU/PG/0001/25) and 2 (AIU/UG/0142/25)
+
+==============================
+DEMO 1: LOST UPDATE (and fix)
+==============================
+[NAIVE] thread results: {'1': 'ok', '2': 'ok'}
+[NAIVE] enrollments rows=2 (expected 2)
+[NAIVE] seats enrolled=1 (LOST UPDATE -> often 1, expected 2)
+[FIXED] thread results: {'1': 'ok', '2': 'ok'}
+[FIXED] enrollments rows=2 (expected 2)
+[FIXED] seats enrolled=2 (expected 2)
+
+==============================
+DEMO 2: TWO-PHASE COMMIT (2PC)
+==============================
+2PC: tx_id=ea697fd4-3c69-448d-a6f9-2693a9afa5f6
+PHASE 1 (PREPARE): write durable 'prepare' records in BOTH databases...
+2PC STATE: mysql_log={'status': 'PREPARED', 'mysql_prepared': 1, 'mongo_prepared': 1, 'mysql_committed': 0, 'mongo_committed': 0}
+2PC STATE: mongo_tx={'tx_id': 'ea697fd4-3c69-448d-a6f9-2693a9afa5f6', 'course_code': 'TXN501', 'prepared_at': '2026-01-07T04:50:39.733078Z', 'status': 'PREPARED', 'student_id': 1}
+2PC STATE: MySQL enrollment_row=1 | Mongo enrolled_courses contains 'TXN501'? False
+
+PHASE 2 (COMMIT): commit MySQL first, then simulate failure BEFORE Mongo commit...
+2PC: expected failure: SIMULATED FAILURE between MySQL commit and Mongo commit
+
+STATE AFTER FAILURE (in-doubt tx):
+2PC STATE: mysql_log={'status': 'COMMITTED_MYSQL', 'mysql_prepared': 1, 'mongo_prepared': 1, 'mysql_committed': 1, 'mongo_committed': 0}
+2PC STATE: mongo_tx={'tx_id': 'ea697fd4-3c69-448d-a6f9-2693a9afa5f6', 'course_code': 'TXN501', 'prepared_at': '2026-01-07T04:50:39.733078Z', 'status': 'PREPARED', 'student_id': 1}
+2PC STATE: MySQL enrollment_row=1 | Mongo enrolled_courses contains 'TXN501'? False
+
+RECOVERY: coordinator scans logs and completes missing commit step...
+RECOVERY: starting...
+RECOVERY: MySQL committed but Mongo not -> committing Mongo now...
+RECOVERY: done.
+
+STATE AFTER RECOVERY:
+2PC STATE: mysql_log={'status': 'COMMITTED_BOTH', 'mysql_prepared': 1, 'mongo_prepared': 1, 'mysql_committed': 1, 'mongo_committed': 1}
+2PC STATE: mongo_tx={'tx_id': 'ea697fd4-3c69-448d-a6f9-2693a9afa5f6', 'course_code': 'TXN501', 'prepared_at': '2026-01-07T04:50:39.733078Z', 'status': 'COMMITTED_MONGO', 'student_id': 1, 'committed_at': '2026-01-07T04:50:39.772558Z'}
+2PC STATE: MySQL enrollment_row=1 | Mongo enrolled_courses contains 'TXN501'? True
+
+2PC: now run a clean commit (no failure) with a new tx_id...
+2PC STATE: mysql_log={'status': 'COMMITTED_BOTH', 'mysql_prepared': 1, 'mongo_prepared': 1, 'mysql_committed': 1, 'mongo_committed': 1}
+2PC STATE: mongo_tx={'tx_id': 'fd777532-a719-40e2-ab89-beee54229626', 'course_code': 'TXN501', 'prepared_at': '2026-01-07T04:50:39.787285Z', 'status': 'COMMITTED_MONGO', 'student_id': 1, 'committed_at': '2026-01-07T04:50:39.799726Z'}
+2PC STATE: MySQL enrollment_row=1 | Mongo enrolled_courses contains 'TXN501'? True
+
+===========================================
+DEMO 3: COMPENSATING TRANSACTION (SAGA)
+===========================================
+SAGA STEP 1: Commit MySQL enrollment...
+MySQL committed enrollment OK
+SAGA STEP 2: Simulate Mongo failure during profile update...
+Mongo failed: SIMULATED Mongo write failure
+SAGA COMPENSATION: delete MySQL enrollment to restore consistency...
+SAGA RESULT: enrollment_row=0 (expected 0 after compensation)
+
+=== C2 TRANSACTION DEMO END ===

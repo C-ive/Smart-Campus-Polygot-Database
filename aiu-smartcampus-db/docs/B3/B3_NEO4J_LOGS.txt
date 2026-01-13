@@ -1,0 +1,39 @@
+﻿aiu-neo4j  | Fetching versions.json for Plugin 'graph-data-science' from https://graphdatascience.ninja/versions.json
+aiu-neo4j  | Installing Plugin 'graph-data-science' from https://graphdatascience.ninja/neo4j-graph-data-science-2.10.1.jar to /var/lib/neo4j/plugins/graph-data-science.jar 
+aiu-neo4j  | Applying default values for plugin graph-data-science to neo4j.conf
+aiu-neo4j  | Changed password for user 'neo4j'. IMPORTANT: this change will only take effect if performed before the database is started for the first time.
+aiu-neo4j  | 2026-01-06 20:22:02.681+0000 INFO  Logging config in use: File '/var/lib/neo4j/conf/user-logs.xml'
+aiu-neo4j  | 2026-01-06 20:22:02.707+0000 INFO  Starting...
+aiu-neo4j  | 2026-01-06 20:22:03.925+0000 INFO  This instance is ServerId{0bf13942} (0bf13942-9963-469d-9d8a-fb40a7c6ed6c)
+aiu-neo4j  | 2026-01-06 20:22:05.425+0000 INFO  ======== Neo4j 5.22.0 ========
+aiu-neo4j  | 2026-01-06 20:22:05.711+0000 INFO  GDS license file: null
+aiu-neo4j  | 2026-01-06 20:22:05.712+0000 INFO  GDS license state: unlicensed
+aiu-neo4j  | 2026-01-06 20:22:05.719+0000 INFO  Progress tracking: enabled
+aiu-neo4j  | 2026-01-06 20:22:05.720+0000 INFO  Memory usage guard: minimum estimate
+aiu-neo4j  | 2026-01-06 20:22:05.724+0000 INFO  Building Graph Data Science extension...
+aiu-neo4j  | 2026-01-06 20:22:05.727+0000 INFO  Register Graph Data Science...
+aiu-neo4j  | 2026-01-06 20:22:05.728+0000 INFO  Graph Data Science registered.
+aiu-neo4j  | 2026-01-06 20:22:05.728+0000 INFO  Register Metrics Facade...
+aiu-neo4j  | 2026-01-06 20:22:05.729+0000 INFO  Metrics Facade registered.
+aiu-neo4j  | 2026-01-06 20:22:05.729+0000 INFO  Register Model Catalog...
+aiu-neo4j  | 2026-01-06 20:22:05.730+0000 INFO  Model Catalog registered.
+aiu-neo4j  | 2026-01-06 20:22:05.730+0000 INFO  Register Task Registry Factory...
+aiu-neo4j  | 2026-01-06 20:22:05.731+0000 INFO  Task Registry Factory registered.
+aiu-neo4j  | 2026-01-06 20:22:05.731+0000 INFO  Register Task Store...
+aiu-neo4j  | 2026-01-06 20:22:05.732+0000 INFO  Task Store registered.
+aiu-neo4j  | 2026-01-06 20:22:05.732+0000 INFO  Register User Log Registry Factory...
+aiu-neo4j  | 2026-01-06 20:22:05.733+0000 INFO  User Log Registry Factory registered.
+aiu-neo4j  | 2026-01-06 20:22:05.733+0000 INFO  Graph Data Science extension built.
+aiu-neo4j  | 2026-01-06 20:22:05.733+0000 INFO  Building Graph Data Science Extras extension...
+aiu-neo4j  | 2026-01-06 20:22:05.734+0000 INFO  Register Graph Data Science Extras...
+aiu-neo4j  | 2026-01-06 20:22:05.735+0000 INFO  Graph Data Science Extras registered.
+aiu-neo4j  | 2026-01-06 20:22:05.735+0000 INFO  Graph Data Science Extras extension built.
+aiu-neo4j  | 2026-01-06 20:22:05.788+0000 INFO  GDS compatibility: for Neo4j 5.22 -- available, for Neo4j 5.23 -- not available, for Neo4j 5.24 -- not available, selected: Neo4j 5.22
+aiu-neo4j  | 2026-01-06 20:22:34.105+0000 INFO  Anonymous Usage Data is being sent to Neo4j, see https://neo4j.com/docs/usage-data/
+aiu-neo4j  | 2026-01-06 20:22:34.281+0000 INFO  Bolt enabled on 0.0.0.0:7687.
+aiu-neo4j  | 2026-01-06 20:22:35.429+0000 INFO  HTTP enabled on 0.0.0.0:7474.
+aiu-neo4j  | 2026-01-06 20:22:35.431+0000 INFO  Remote interface available at http://localhost:7474/
+aiu-neo4j  | 2026-01-06 20:22:35.438+0000 INFO  id: 0D5F88947EA935766B6DDB0BCB83E6D25C7434D66D263A6635ED035209BFCB7D
+aiu-neo4j  | 2026-01-06 20:22:35.438+0000 INFO  name: system
+aiu-neo4j  | 2026-01-06 20:22:35.439+0000 INFO  creationDate: 2026-01-06T20:22:09.282Z
+aiu-neo4j  | 2026-01-06 20:22:35.439+0000 INFO  Started.

@@ -1,0 +1,7 @@
+﻿student_id,activity_type,resource_id,timestamp,session_duration,ip_address
+1,login,,2026-01-07 01:10:00,15,127.0.0.1
+1,view_material,CS501-W1,2026-01-07 01:12:00,420,127.0.0.1
+2,login,,2026-01-07 01:13:00,10,127.0.0.1
+2,view_material,BA210-I1,2026-01-07 01:14:00,300,127.0.0.1
+4,login,,2026-01-07 01:15:00,12,127.0.0.1
+4,view_material,CS501-W2,2026-01-07 01:16:00,280,127.0.0.1

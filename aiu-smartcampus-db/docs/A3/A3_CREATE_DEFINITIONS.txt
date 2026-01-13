@@ -1,0 +1,126 @@
+﻿*************************** 1. row ***************************
+           Procedure: sp_StudentAnalytics
+            sql_mode: STRICT_TRANS_TABLES,ERROR_FOR_DIVISION_BY_ZERO,NO_ENGINE_SUBSTITUTION
+    Create Procedure: CREATE DEFINER=`root`@`localhost` PROCEDURE `sp_StudentAnalytics`(IN p_student_id INT UNSIGNED)
+BEGIN
+  
+
+  SELECT
+    s.student_id,
+    s.reg_no,
+    s.first_name,
+    s.last_name,
+    s.email,
+    d.name AS department_name,
+    s.status,
+
+    COALESCE(en.course_count, 0) AS courses_enrolled,
+
+    COALESCE(act.total_actions, 0)  AS total_activity_actions,
+    COALESCE(act.total_seconds, 0)  AS total_activity_seconds,
+    ROUND(COALESCE(act.total_seconds,0) / 60, 2)    AS total_activity_minutes,
+    ROUND(COALESCE(act.total_seconds,0) / 3600, 2)  AS total_activity_hours,
+    act.last_activity_at,
+
+    perf.avg_final_score AS avg_final_score,
+
+    udf_CalculateStudentEngagement(p_student_id, 30) AS engagement_score_30d
+
+  FROM students s
+  JOIN departments d
+    ON d.department_id = s.department_id
+
+  LEFT JOIN (
+    SELECT student_id, COUNT(DISTINCT course_id) AS course_count
+    FROM enrollments
+    WHERE student_id = p_student_id
+      AND status IN ('enrolled','completed')
+    GROUP BY student_id
+  ) en
+    ON en.student_id = s.student_id
+
+  LEFT JOIN (
+    SELECT student_id,
+           COUNT(*) AS total_actions,
+           COALESCE(SUM(session_duration),0) AS total_seconds,
+           MAX(`timestamp`) AS last_activity_at
+    FROM activity_logs
+    WHERE student_id = p_student_id
+    GROUP BY student_id
+  ) act
+    ON act.student_id = s.student_id
+
+  LEFT JOIN (
+    SELECT student_id, ROUND(AVG(final_score),2) AS avg_final_score
+    FROM student_course_performance
+    WHERE student_id = p_student_id
+    GROUP BY student_id
+  ) perf
+    ON perf.student_id = s.student_id
+
+  WHERE s.student_id = p_student_id;
+END
+character_set_client: latin1
+collation_connection: latin1_swedish_ci
+  Database Collation: utf8mb4_0900_ai_ci
+*************************** 1. row ***************************
+            Function: udf_CalculateStudentEngagement
+            sql_mode: STRICT_TRANS_TABLES,ERROR_FOR_DIVISION_BY_ZERO,NO_ENGINE_SUBSTITUTION
+     Create Function: CREATE DEFINER=`root`@`localhost` FUNCTION `udf_CalculateStudentEngagement`(
+  p_student_id INT UNSIGNED,
+  p_days INT UNSIGNED
+) RETURNS decimal(6,2)
+    READS SQL DATA
+BEGIN
+  DECLARE v_days INT UNSIGNED DEFAULT 30;
+  DECLARE v_count BIGINT UNSIGNED DEFAULT 0;
+  DECLARE v_seconds BIGINT UNSIGNED DEFAULT 0;
+
+  DECLARE v_freq_per_day DECIMAL(10,4) DEFAULT 0;
+  DECLARE v_minutes_per_day DECIMAL(10,4) DEFAULT 0;
+  DECLARE v_score DECIMAL(10,4) DEFAULT 0;
+
+  
+  IF p_days IS NOT NULL AND p_days > 0 AND p_days <= 3650 THEN
+    SET v_days = p_days;
+  END IF;
+
+  SELECT COUNT(*), COALESCE(SUM(session_duration),0)
+    INTO v_count, v_seconds
+  FROM activity_logs
+  WHERE student_id = p_student_id
+    AND `timestamp` >= (NOW() - INTERVAL v_days DAY);
+
+  SET v_freq_per_day    = v_count / v_days;
+  SET v_minutes_per_day = (v_seconds / 60) / v_days;
+
+  
+  
+  
+  SET v_score =
+      LEAST(60, v_freq_per_day * 10)
+    + LEAST(40, v_minutes_per_day * 2);
+
+  RETURN ROUND(v_score, 2);
+END
+character_set_client: latin1
+collation_connection: latin1_swedish_ci
+  Database Collation: utf8mb4_0900_ai_ci
+*************************** 1. row ***************************
+       Table: activity_logs_archive
+Create Table: CREATE TABLE `activity_logs_archive` (
+  `id` bigint unsigned NOT NULL,
+  `student_id` int unsigned NOT NULL,
+  `activity_type` varchar(30) NOT NULL,
+  `resource_id` bigint unsigned DEFAULT NULL,
+  `timestamp` datetime(3) NOT NULL,
+  `session_duration` int unsigned NOT NULL DEFAULT '0',
+  `ip_address` varchar(45) NOT NULL,
+  `archived_at` timestamp NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  PRIMARY KEY (`id`),
+  KEY `idx_archive_student_time` (`student_id`,`timestamp`),
+  KEY `idx_archive_time` (`timestamp`),
+  CONSTRAINT `chk_archive_activity_type` CHECK ((`activity_type` in (_latin1'login',_latin1'logout',_latin1'view_material',_latin1'download_material',_latin1'watch_video',_latin1'attempt_quiz',_latin1'submit_assignment',_latin1'forum_post',_latin1'message'))),
+  CONSTRAINT `chk_archive_ip_not_empty` CHECK ((char_length(`ip_address`) >= 7)),
+  CONSTRAINT `chk_archive_session_duration` CHECK ((`session_duration` >= 0))
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci

@@ -1,0 +1,23 @@
+﻿Table	Non_unique	Key_name	Seq_in_index	Column_name	Collation	Cardinality	Sub_part	Packed	Null	Index_type	Comment	Index_comment	Visible	Expression
+activity_logs	0	PRIMARY	1	id	A	2000	NULL	NULL		BTREE			YES	NULL
+activity_logs	1	idx_activity_type	1	activity_type	A	9	NULL	NULL		BTREE			YES	NULL
+activity_logs	1	idx_activity_time	1	timestamp	A	2000	NULL	NULL		BTREE			YES	NULL
+activity_logs	1	idx_activity_ip	1	ip_address	A	255	NULL	NULL		BTREE			YES	NULL
+activity_logs	1	idx_activity_student_time	1	student_id	A	200	NULL	NULL		BTREE			YES	NULL
+activity_logs	1	idx_activity_student_time	2	timestamp	A	2000	NULL	NULL		BTREE			YES	NULL
+activity_logs	1	idx_activity_cover_report	1	student_id	A	200	NULL	NULL		BTREE			YES	NULL
+activity_logs	1	idx_activity_cover_report	2	timestamp	A	2000	NULL	NULL		BTREE			YES	NULL
+activity_logs	1	idx_activity_cover_report	3	activity_type	A	2000	NULL	NULL		BTREE			YES	NULL
+activity_logs	1	idx_activity_cover_report	4	session_duration	A	2000	NULL	NULL		BTREE			YES	NULL
+Table	Non_unique	Key_name	Seq_in_index	Column_name	Collation	Cardinality	Sub_part	Packed	Null	Index_type	Comment	Index_comment	Visible	Expression
+sensors	0	PRIMARY	1	sensor_id	A	20	NULL	NULL		BTREE			YES	NULL
+sensors	1	idx_sensors_type	1	sensor_type	A	4	NULL	NULL		BTREE			YES	NULL
+sensors	1	idx_sensors_room_type	1	room_id	A	5	NULL	NULL		BTREE			YES	NULL
+sensors	1	idx_sensors_room_type	2	sensor_type	A	20	NULL	NULL		BTREE			YES	NULL
+Table	Non_unique	Key_name	Seq_in_index	Column_name	Collation	Cardinality	Sub_part	Packed	Null	Index_type	Comment	Index_comment	Visible	Expression
+sensor_readings	0	PRIMARY	1	id	A	3360	NULL	NULL		BTREE			YES	NULL
+sensor_readings	0	uq_sensor_readings	1	sensor_id	A	20	NULL	NULL		BTREE			YES	NULL
+sensor_readings	0	uq_sensor_readings	2	timestamp	A	3360	NULL	NULL		BTREE			YES	NULL
+sensor_readings	1	idx_readings_time	1	timestamp	A	168	NULL	NULL		BTREE			YES	NULL
+sensor_readings	1	idx_readings_status_time	1	status	A	1	NULL	NULL		BTREE			YES	NULL
+sensor_readings	1	idx_readings_status_time	2	timestamp	A	168	NULL	NULL		BTREE			YES	NULL

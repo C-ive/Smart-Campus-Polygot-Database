@@ -1,0 +1,531 @@
+﻿#!/usr/bin/env python3
+"""
+C1_etl.py — Real-time ETL pipeline (file-based stream simulation)
+
+Fixes:
+- Strip UTF-8 BOM from JSONL first line + CSV header keys (PowerShell writes BOM)
+- Safe incremental loading: reads ONLY COMPLETE appended lines
+- CSV: always reuse true header line even when reading appended chunks
+- MySQL: uses `timestamp`, numeric-only resource_id (NULL if not numeric)
+- Mongo: writes validator-compatible student_profiles docs
+- Flags: --reset-checkpoint, --reset-bad-rows
+"""
+
+from __future__ import annotations
+
+import argparse
+import csv
+import json
+import os
+import time
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any, Dict, List, Tuple
+
+import pymysql
+from pymongo import MongoClient
+import clickhouse_connect
+from neo4j import GraphDatabase
+
+
+ROOT = Path(__file__).resolve().parents[1]
+INBOX = ROOT / "pipeline" / "inbox"
+STATE = ROOT / "pipeline" / "state"
+BAD   = ROOT / "pipeline" / "bad_rows"
+BAD.mkdir(parents=True, exist_ok=True)
+
+CHECKPOINT_PATH = STATE / "checkpoint.json"
+
+
+def env(name: str, default: str = "") -> str:
+    v = os.environ.get(name)
+    return v if v not in (None, "") else default
+
+
+def strip_bom(s: str) -> str:
+    return s.lstrip("\ufeff") if isinstance(s, str) else s
+
+
+def now_utc_str() -> str:
+    return datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+
+
+def load_checkpoint() -> Dict[str, int]:
+    if CHECKPOINT_PATH.exists():
+        return json.loads(CHECKPOINT_PATH.read_text(encoding="utf-8"))
+    return {}
+
+
+def save_checkpoint(cp: Dict[str, int]) -> None:
+    STATE.mkdir(parents=True, exist_ok=True)
+    CHECKPOINT_PATH.write_text(json.dumps(cp, indent=2), encoding="utf-8")
+
+
+def write_bad(source: str, rows: List[Dict[str, Any]]) -> None:
+    if not rows:
+        return
+    out = BAD / f"{source}_bad_{now_utc_str()}.jsonl"
+    with out.open("w", encoding="utf-8") as f:
+        for r in rows:
+            f.write(json.dumps(r, ensure_ascii=False) + "\n")
+
+
+# -------------------------
+# SAFE incremental reader
+# -------------------------
+def read_new_complete_lines(path: Path, last_pos: int) -> Tuple[List[str], int]:
+    """
+    Reads ONLY complete lines appended since last_pos.
+    - If last_pos is mid-line, skip to next newline.
+    - Only returns lines that end with newline in the file.
+    Returns (lines, new_pos).
+    """
+    if not path.exists():
+        return [], last_pos
+
+    data = path.read_bytes()
+    if last_pos >= len(data):
+        return [], last_pos
+
+    chunk = data[last_pos:]
+
+    # If last_pos wasn't at newline boundary, skip partial first line
+    if last_pos > 0 and data[last_pos - 1] not in (10, 13):
+        nl = chunk.find(b"\n")
+        if nl == -1:
+            return [], last_pos
+        chunk = chunk[nl + 1 :]
+        last_pos = last_pos + nl + 1
+
+    # Keep only through last newline
+    end_nl = chunk.rfind(b"\n")
+    if end_nl == -1:
+        return [], last_pos
+
+    usable = chunk[: end_nl + 1]
+    new_pos = last_pos + end_nl + 1
+
+    text = usable.decode("utf-8", errors="replace")
+    lines = [ln for ln in text.splitlines() if ln.strip() != ""]
+    return lines, new_pos
+
+
+def get_csv_header_line(path: Path) -> str:
+    if not path.exists():
+        return ""
+    with path.open("rb") as f:
+        first = f.readline().decode("utf-8", errors="replace").strip("\r\n")
+    return strip_bom(first)
+
+
+# -------------------------
+# Connections
+# -------------------------
+def mysql_conn():
+    host = env("MYSQL_HOST", "db")
+    port = int(env("MYSQL_INNER_PORT", "3306"))
+    user = env("MYSQL_ETL_USER", "root")
+    pwd  = env("MYSQL_ETL_PASSWORD", env("MYSQL_ROOT_PASSWORD", ""))
+    db1  = env("MYSQL_ETL_DB", "aiu_urms_ext")
+
+    last_err = None
+    for _ in range(40):
+        try:
+            conn = pymysql.connect(
+                host=host, port=port, user=user, password=pwd,
+                autocommit=False, charset="utf8mb4",
+                cursorclass=pymysql.cursors.DictCursor
+            )
+            with conn.cursor() as cur:
+                cur.execute(f"CREATE DATABASE IF NOT EXISTS `{db1}`;")
+                cur.execute(f"USE `{db1}`;")
+            conn.commit()
+            return conn, db1
+        except Exception as e:
+            last_err = e
+            time.sleep(2)
+
+    raise RuntimeError(f"MySQL not reachable on {host}:{port} after retries: {last_err}")
+
+
+def mysql_table_columns(conn, table: str) -> Dict[str, Dict[str, Any]]:
+    with conn.cursor() as cur:
+        cur.execute(f"SHOW COLUMNS FROM `{table}`;")
+        rows = cur.fetchall()
+    out: Dict[str, Dict[str, Any]] = {}
+    for r in rows:
+        out[r["Field"]] = {"Null": r["Null"], "Type": r["Type"]}
+    return out
+
+
+def mongo_conn():
+    host = env("MONGO_HOST", "mongo")
+    port = int(env("MONGO_INNER_PORT", "27017"))
+    user = env("MONGO_INITDB_ROOT_USERNAME", "root")
+    pwd  = env("MONGO_INITDB_ROOT_PASSWORD", "rootpass")
+    client = MongoClient(f"mongodb://{user}:{pwd}@{host}:{port}/admin")
+    return client, client["aiu_smartcampus"]
+
+
+def clickhouse_client():
+    host = env("CLICKHOUSE_HOST", "clickhouse")
+    port = int(env("CLICKHOUSE_PORT", "8123"))
+    user = env("CLICKHOUSE_USER", "ch_admin")
+    pwd  = env("CLICKHOUSE_PASSWORD", "chpass123")
+    db   = env("CLICKHOUSE_DB", "aiu_timeseries")
+    return clickhouse_connect.get_client(host=host, port=port, username=user, password=pwd, database=db, secure=False)
+
+
+def neo4j_driver():
+    host = env("NEO4J_HOST", "neo4j")
+    port = int(env("NEO4J_BOLT_INNER_PORT", "7687"))
+    auth = env("NEO4J_AUTH", "neo4j/neo4jpass123")
+    neo_user, neo_pass = auth.split("/", 1)
+    return GraphDatabase.driver(f"bolt://{host}:{port}", auth=(neo_user, neo_pass))
+
+
+def split_name(full_name: str) -> Tuple[str, str]:
+    parts = (full_name or "").strip().split()
+    if not parts:
+        return "Unknown", "Unknown"
+    first = parts[0]
+    last  = " ".join(parts[1:]) if len(parts) > 1 else "Unknown"
+    return first, last
+
+
+# -------------------------
+# ETL: student profiles (JSONL -> Mongo + MySQL)
+# -------------------------
+def etl_student_profiles(cp: Dict[str, int], mysql, mongo_db, mysql_dept_col: str) -> Tuple[int, int]:
+    src = INBOX / "student_profiles.jsonl"
+    last = cp.get("student_profiles.jsonl", 0)
+    lines, newpos = read_new_complete_lines(src, last)
+    if not lines:
+        return 0, 0
+
+    ok_docs: List[Dict[str, Any]] = []
+    bad: List[Dict[str, Any]] = []
+
+    for line in lines:
+        try:
+            line = strip_bom(line)  # ✅ BOM fix for JSONL first record
+            d = json.loads(line)
+            for k in ("student_id", "reg_no", "full_name", "department", "year_of_study", "email"):
+                if k not in d or d[k] in (None, ""):
+                    raise ValueError(f"missing {k}")
+            d["student_id"] = int(d["student_id"])
+            d["year_of_study"] = int(d["year_of_study"])
+            ok_docs.append(d)
+        except Exception as e:
+            bad.append({"raw": line, "error": str(e)})
+
+    if bad:
+        write_bad("student_profiles", bad)
+
+    # Mongo validator-compatible structure
+    for d in ok_docs:
+        first, lastn = split_name(d.get("full_name", ""))
+        mongo_doc = {
+            "student_id": d["student_id"],
+            "reg_no": d["reg_no"],
+            "name": {"first": first, "last": lastn},
+            "email": d["email"],
+            "department_name": d["department"],
+            "status": "active",
+            "preferences": {
+                "notifications": {"email": True, "sms": False, "push": True},
+                "ui": {"theme": "light", "language": "en"},
+            },
+            "phone": d.get("phone"),
+            "year_of_study": d.get("year_of_study"),
+        }
+        try:
+            mongo_db["student_profiles"].update_one(
+                {"student_id": mongo_doc["student_id"]},
+                {"$set": mongo_doc},
+                upsert=True,
+            )
+        except Exception as e:
+            write_bad("student_profiles_mongo", [{"raw": mongo_doc, "error": str(e)}])
+
+    inserted = 0
+    with mysql.cursor() as cur:
+        dept_names = sorted({d["department"] for d in ok_docs})
+        for nm in dept_names:
+            cur.execute(f"INSERT IGNORE INTO departments({mysql_dept_col}) VALUES (%s);", (nm,))
+
+        cur.execute(f"SELECT department_id, {mysql_dept_col} AS dept_name FROM departments;")
+        dept_map = {r["dept_name"]: r["department_id"] for r in cur.fetchall()}
+
+        for d in ok_docs:
+            dept_id = dept_map[d["department"]]
+            first, lastn = split_name(d.get("full_name", ""))
+            yos = int(d["year_of_study"])
+            enrollment_year = datetime.now(timezone.utc).year - max(yos - 1, 0)
+
+            cur.execute(
+                """
+                INSERT INTO students(student_id, department_id, reg_no, first_name, last_name, email, enrollment_year, status)
+                VALUES (%s,%s,%s,%s,%s,%s,%s,'active')
+                ON DUPLICATE KEY UPDATE
+                  department_id=VALUES(department_id),
+                  reg_no=VALUES(reg_no),
+                  first_name=VALUES(first_name),
+                  last_name=VALUES(last_name),
+                  email=VALUES(email),
+                  enrollment_year=VALUES(enrollment_year),
+                  status=VALUES(status);
+                """,
+                (d["student_id"], dept_id, d["reg_no"], first, lastn, d["email"], enrollment_year),
+            )
+            inserted += 1
+
+    mysql.commit()
+    cp["student_profiles.jsonl"] = newpos
+    return inserted, len(bad)
+
+
+# -------------------------
+# ETL: activity logs (CSV -> MySQL)
+# -------------------------
+def etl_activity_logs(cp: Dict[str, int], mysql, resource_nullable: bool) -> Tuple[int, int]:
+    src = INBOX / "activity_logs.csv"
+    last = cp.get("activity_logs.csv", 0)
+    lines, newpos = read_new_complete_lines(src, last)
+    if not lines:
+        return 0, 0
+
+    header = get_csv_header_line(src)  # ✅ header is BOM-stripped
+    if not header:
+        return 0, 0
+
+    # Drop header from data lines if present
+    if last == 0 and lines and strip_bom(lines[0]).strip() == header.strip():
+        lines = lines[1:]
+
+    ok_rows: List[Tuple[Any, ...]] = []
+    bad: List[Dict[str, Any]] = []
+
+    rdr = csv.DictReader([header] + lines)
+    for r in rdr:
+        try:
+            # ✅ also guard against BOM sneaking into DictReader fieldnames
+            r = {strip_bom(k): v for k, v in r.items()}
+
+            sid = int((r.get("student_id") or "").strip())
+            at  = (r.get("activity_type") or "").strip()
+            if at not in ("login", "logout", "view_material", "submit_assignment"):
+                raise ValueError("bad activity_type")
+
+            ts_raw = (r.get("timestamp") or "").strip()
+            ts = datetime.strptime(ts_raw, "%Y-%m-%d %H:%M:%S")
+
+            dur = int((r.get("session_duration") or "0").strip() or 0)
+            ip  = (r.get("ip_address") or "").strip() or "0.0.0.0"
+
+            rid_raw = (r.get("resource_id") or "").strip()
+            if rid_raw.isdigit():
+                rid: Any = int(rid_raw)
+            else:
+                rid = None if resource_nullable else 0
+
+            ok_rows.append((sid, at, rid, ts.strftime("%Y-%m-%d %H:%M:%S"), dur, ip))
+        except Exception as e:
+            bad.append({"raw": r, "error": str(e)})
+
+    if bad:
+        write_bad("activity_logs", bad)
+
+    if ok_rows:
+        with mysql.cursor() as cur:
+            cur.executemany(
+                """
+                INSERT INTO activity_logs(student_id, activity_type, resource_id, `timestamp`, session_duration, ip_address)
+                VALUES (%s,%s,%s,%s,%s,%s);
+                """,
+                ok_rows,
+            )
+        mysql.commit()
+
+    cp["activity_logs.csv"] = newpos
+    return len(ok_rows), len(bad)
+
+
+# -------------------------
+# ETL: sensor readings (CSV -> ClickHouse)
+# -------------------------
+def etl_sensor_readings(cp: Dict[str, int], ch) -> Tuple[int, int]:
+    src = INBOX / "sensor_readings.csv"
+    last = cp.get("sensor_readings.csv", 0)
+    lines, newpos = read_new_complete_lines(src, last)
+    if not lines:
+        return 0, 0
+
+    header = get_csv_header_line(src)  # ✅ header is BOM-stripped
+    if not header:
+        return 0, 0
+
+    if last == 0 and lines and strip_bom(lines[0]).strip() == header.strip():
+        lines = lines[1:]
+
+    ok: List[Tuple[Any, ...]] = []
+    bad: List[Dict[str, Any]] = []
+
+    rdr = csv.DictReader([header] + lines)
+    for r in rdr:
+        try:
+            r = {strip_bom(k): v for k, v in r.items()}
+            ok.append((
+                int((r.get("sensor_id") or "").strip()),
+                int((r.get("room_id") or "").strip()),
+                (r.get("sensor_type") or "").strip(),
+                (r.get("ts") or "").strip(),
+                float((r.get("value") or "").strip()),
+                (r.get("status") or "ok").strip(),
+            ))
+        except Exception as e:
+            bad.append({"raw": r, "error": str(e)})
+
+    if bad:
+        write_bad("sensor_readings", bad)
+
+    if ok:
+        ch.insert(
+            "aiu_timeseries.sensor_readings_raw",
+            ok,
+            column_names=["sensor_id", "room_id", "sensor_type", "ts", "value", "status"],
+        )
+
+    cp["sensor_readings.csv"] = newpos
+    return len(ok), len(bad)
+
+
+# -------------------------
+# ETL: club memberships (CSV -> Neo4j)
+# -------------------------
+def etl_club_memberships(cp: Dict[str, int], driver) -> Tuple[int, int]:
+    src = INBOX / "club_memberships.csv"
+    last = cp.get("club_memberships.csv", 0)
+    lines, newpos = read_new_complete_lines(src, last)
+    if not lines:
+        return 0, 0
+
+    header = get_csv_header_line(src)  # ✅ header is BOM-stripped
+    if not header:
+        return 0, 0
+
+    if last == 0 and lines and strip_bom(lines[0]).strip() == header.strip():
+        lines = lines[1:]
+
+    ok: List[Dict[str, str]] = []
+    bad: List[Dict[str, Any]] = []
+
+    rdr = csv.DictReader([header] + lines)
+    for r in rdr:
+        try:
+            r = {strip_bom(k): v for k, v in r.items()}
+            reg = (r.get("reg_no") or "").strip()
+            club = (r.get("club") or "").strip()
+            if not reg or not club:
+                raise ValueError("missing reg_no/club")
+            ok.append({"reg_no": reg, "club": club})
+        except Exception as e:
+            bad.append({"raw": r, "error": str(e)})
+
+    if bad:
+        write_bad("club_memberships", bad)
+
+    if ok:
+        q = """
+        UNWIND $rows AS row
+        MERGE (s:Student {reg_no: row.reg_no})
+        MERGE (c:Club {name: row.club})
+        MERGE (s)-[:MEMBER_OF]->(c);
+        """
+        with driver.session() as sess:
+            sess.execute_write(lambda tx: tx.run(q, rows=ok).consume())
+
+    cp["club_memberships.csv"] = newpos
+    return len(ok), len(bad)
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--reset-checkpoint", action="store_true")
+    ap.add_argument("--reset-bad-rows", action="store_true")
+    args = ap.parse_args()
+
+    if args.reset_bad_rows and BAD.exists():
+        for p in BAD.glob("*"):
+            try:
+                p.unlink()
+            except Exception:
+                pass
+
+    if args.reset_checkpoint and CHECKPOINT_PATH.exists():
+        CHECKPOINT_PATH.unlink()
+
+    print("=== C1 ETL START ===")
+    cp = load_checkpoint()
+
+    mysql, mysql_db = mysql_conn()
+    mongo_client, mongo_db = mongo_conn()
+    ch = clickhouse_client()
+    neo = neo4j_driver()
+
+    try:
+        dept_cols = mysql_table_columns(mysql, "departments")
+        mysql_dept_col = "name" if "name" in dept_cols else "department_name"
+
+        act_cols = mysql_table_columns(mysql, "activity_logs")
+        resource_nullable = (act_cols.get("resource_id", {}).get("Null") == "YES")
+
+        sp_ok, sp_bad = etl_student_profiles(cp, mysql, mongo_db, mysql_dept_col)
+        al_ok, al_bad = etl_activity_logs(cp, mysql, resource_nullable)
+        sr_ok, sr_bad = etl_sensor_readings(cp, ch)
+        cm_ok, cm_bad = etl_club_memberships(cp, neo)
+
+        save_checkpoint(cp)
+
+        with mysql.cursor() as cur:
+            cur.execute("SELECT COUNT(*) AS n FROM departments;")
+            dept_n = cur.fetchone()["n"]
+            cur.execute("SELECT COUNT(*) AS n FROM students;")
+            stu_n = cur.fetchone()["n"]
+            cur.execute("SELECT COUNT(*) AS n FROM activity_logs;")
+            log_n = cur.fetchone()["n"]
+
+        mongo_n = mongo_db["student_profiles"].count_documents({})
+        ch_n = ch.query("SELECT count() FROM aiu_timeseries.sensor_readings_raw").result_rows[0][0]
+
+        with neo.session() as sess:
+            neo_students = sess.run("MATCH (s:Student) RETURN count(s) AS n").single()["n"]
+            neo_clubs = sess.run("MATCH (c:Club) RETURN count(c) AS n").single()["n"]
+
+        print("--- ETL RESULT ---")
+        print(f"MySQL db={mysql_db} departments={dept_n} students={stu_n} activity_logs={log_n}")
+        print(f"Mongo student_profiles={mongo_n}")
+        print(f"ClickHouse sensor_readings_raw={ch_n}")
+        print(f"Neo4j Students={neo_students} Clubs={neo_clubs}")
+
+        print("--- BATCH STATS ---")
+        print(f"student_profiles ok={sp_ok} bad={sp_bad}")
+        print(f"activity_logs    ok={al_ok} bad={al_bad}")
+        print(f"sensor_readings  ok={sr_ok} bad={sr_bad}")
+        print(f"club_memberships ok={cm_ok} bad={cm_bad}")
+
+        print("=== C1 ETL END ===")
+        return 0
+
+    finally:
+        try: mysql.close()
+        except: pass
+        try: mongo_client.close()
+        except: pass
+        try: neo.close()
+        except: pass
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
+

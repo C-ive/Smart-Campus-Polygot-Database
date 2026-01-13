@@ -1,0 +1,4 @@
+﻿{
+  student_profiles: 3,
+  course_catalogs: 3
+}

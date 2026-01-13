@@ -1,0 +1,12 @@
+﻿Tables_in_aiu_urms_ext
+activity_logs
+courses
+departments
+enrollments
+lecturers
+materials
+rooms
+sensor_readings
+sensors
+student_course_performance
+students

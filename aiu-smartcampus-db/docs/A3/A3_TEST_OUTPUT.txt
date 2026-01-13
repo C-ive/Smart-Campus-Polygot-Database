@@ -1,0 +1,4 @@
+﻿student_id	reg_no	first_name	last_name	email	department_name	status	courses_enrolled	total_activity_actions	total_activity_seconds	total_activity_minutes	total_activity_hours	last_activity_at	avg_final_score	engagement_score_30d
+1	AIU2026-0110	Student110	Test	student110@aiu.ac.ke	Business	active	4	10	5300	88.33	1.47	2026-01-05 21:05:57.000	94.00	4.36
+student_id	engagement_score_30d
+1	4.36

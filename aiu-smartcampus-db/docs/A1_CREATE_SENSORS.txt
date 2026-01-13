@@ -1,0 +1,13 @@
+﻿*************************** 1. row ***************************
+       Table: sensors
+Create Table: CREATE TABLE `sensors` (
+  `sensor_id` int unsigned NOT NULL AUTO_INCREMENT,
+  `room_id` int unsigned NOT NULL,
+  `sensor_type` varchar(30) NOT NULL,
+  `manufacturer` varchar(120) NOT NULL,
+  `installation_date` date NOT NULL,
+  PRIMARY KEY (`sensor_id`),
+  KEY `fk_sensors_room` (`room_id`),
+  CONSTRAINT `fk_sensors_room` FOREIGN KEY (`room_id`) REFERENCES `rooms` (`room_id`) ON DELETE RESTRICT ON UPDATE CASCADE,
+  CONSTRAINT `chk_sensor_type` CHECK ((`sensor_type` in (_latin1'temperature',_latin1'humidity',_latin1'occupancy',_latin1'energy',_latin1'co2',_latin1'light')))
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci

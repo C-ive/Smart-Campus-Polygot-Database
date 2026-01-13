@@ -1,0 +1,6 @@
+﻿Db	Name	Type	Definer	Modified	Created	Security_type	Comment	character_set_client	collation_connection	Database Collation
+aiu_urms_ext	sp_StudentAnalytics	PROCEDURE	root@localhost	2026-01-06 16:11:44	2026-01-06 16:11:44	DEFINER		latin1	latin1_swedish_ci	utf8mb4_0900_ai_ci
+Db	Name	Type	Definer	Modified	Created	Security_type	Comment	character_set_client	collation_connection	Database Collation
+aiu_urms_ext	udf_CalculateStudentEngagement	FUNCTION	root@localhost	2026-01-06 16:11:44	2026-01-06 16:11:44	DEFINER		latin1	latin1_swedish_ci	utf8mb4_0900_ai_ci
+Trigger	Event	Table	Statement	Timing	Created	sql_mode	Definer	character_set_client	collation_connection	Database Collation
+trg_archive_activity	DELETE	activity_logs	BEGIN\n  IF OLD.`timestamp` < (NOW() - INTERVAL 1 YEAR) THEN\n    INSERT INTO activity_logs_archive\n      (id, student_id, activity_type, resource_id, `timestamp`, session_duration, ip_address, archived_at)\n    VALUES\n      (OLD.id, OLD.student_id, OLD.activity_type, OLD.resource_id, OLD.`timestamp`, OLD.session_duration, OLD.ip_address, NOW());\n  END IF;\nEND	BEFORE	2026-01-06 16:11:44.91	STRICT_TRANS_TABLES,ERROR_FOR_DIVISION_BY_ZERO,NO_ENGINE_SUBSTITUTION	root@localhost	latin1	latin1_swedish_ci	utf8mb4_0900_ai_ci

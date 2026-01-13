@@ -1,0 +1,6 @@
+﻿sensor_id	UInt32					
+room_id	UInt32					
+sensor_type	LowCardinality(String)					
+ts	DateTime64(3, \'UTC\')					
+value	Float64					
+status	LowCardinality(String)					

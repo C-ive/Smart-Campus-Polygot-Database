@@ -1,0 +1,2 @@
+﻿NAME             IMAGE                               COMMAND            SERVICE      CREATED         STATUS        PORTS
+aiu-clickhouse   clickhouse/clickhouse-server:24.8   "/entrypoint.sh"   clickhouse   3 seconds ago   Up 1 second   0.0.0.0:8125->8123/tcp, [::]:8125->8123/tcp, 0.0.0.0:9005->9000/tcp, [::]:9005->9000/tcp

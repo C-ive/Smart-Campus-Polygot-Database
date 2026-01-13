@@ -1,0 +1,5 @@
+﻿NAME                           IMAGE                 COMMAND                  SERVICE         CREATED         STATUS                 PORTS
+aiu-mongo                      mongo:7.0             "docker-entrypoint.sΓÇª"   mongo           8 minutes ago   Up 8 minutes           0.0.0.0:27018->27017/tcp, [::]:27018->27017/tcp
+aiu-mongo-express              mongo-express:1.0.2   "/sbin/tini -- /dockΓÇª"   mongo-express   8 minutes ago   Up 8 minutes           0.0.0.0:8084->8081/tcp, [::]:8084->8081/tcp
+aiu-smartcampus-db-adminer-1   adminer:4             "entrypoint.sh dockeΓÇª"   adminer         2 hours ago     Up 2 hours             0.0.0.0:8082->8080/tcp, [::]:8082->8080/tcp
+aiu-smartcampus-db-db-1        mysql:8.0             "docker-entrypoint.sΓÇª"   db              2 hours ago     Up 2 hours (healthy)   0.0.0.0:3307->3306/tcp, [::]:3307->3306/tcp

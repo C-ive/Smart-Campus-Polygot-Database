@@ -1,0 +1,2 @@
+﻿students	activity_logs	sensors	sensor_readings
+200	2000	20	3360

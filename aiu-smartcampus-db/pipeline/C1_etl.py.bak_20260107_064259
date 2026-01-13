@@ -1,0 +1,499 @@
+﻿#!/usr/bin/env python3
+"""
+C1_etl.py — Real-time ETL pipeline (file-based stream simulation)
+
+Sources (pipeline/inbox):
+- student_profiles.jsonl  -> MongoDB (aiu_smartcampus.student_profiles) + MySQL dimension (departments, students)
+- activity_logs.csv       -> MySQL (activity_logs)
+- sensor_readings.csv     -> ClickHouse (aiu_timeseries.sensor_readings_raw)
+- club_memberships.csv    -> Neo4j (MERGE Student/Club + MEMBER_OF)
+
+Features:
+- incremental checkpoints (byte offsets) in pipeline/state/checkpoint.json
+- validation + bad row capture
+- proof-friendly stdout summary
+"""
+
+from __future__ import annotations
+
+import csv
+import json
+import os
+import time
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any, Dict, List, Tuple
+
+import pymysql
+from pymongo import MongoClient
+import clickhouse_connect
+from neo4j import GraphDatabase
+
+
+ROOT = Path(__file__).resolve().parents[1]
+INBOX = ROOT / "pipeline" / "inbox"
+STATE = ROOT / "pipeline" / "state"
+BAD   = ROOT / "pipeline" / "bad_rows"
+BAD.mkdir(parents=True, exist_ok=True)
+
+CHECKPOINT_PATH = STATE / "checkpoint.json"
+
+
+def env(name: str, default: str = "") -> str:
+    v = os.environ.get(name)
+    return v if v not in (None, "") else default
+
+
+def load_checkpoint() -> Dict[str, int]:
+    if CHECKPOINT_PATH.exists():
+        return json.loads(CHECKPOINT_PATH.read_text(encoding="utf-8"))
+    return {}
+
+
+def save_checkpoint(cp: Dict[str, int]) -> None:
+    STATE.mkdir(parents=True, exist_ok=True)
+    CHECKPOINT_PATH.write_text(json.dumps(cp, indent=2), encoding="utf-8")
+
+
+def read_new_bytes(path: Path, last: int) -> Tuple[str, int]:
+    if not path.exists():
+        return "", last
+    data = path.read_bytes()
+    if last >= len(data):
+        return "", last
+    chunk = data[last:]
+    return chunk.decode("utf-8", errors="replace"), len(data)
+
+
+def write_bad(source: str, rows: List[Dict[str, Any]]) -> None:
+    if not rows:
+        return
+    ts = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+    out = BAD / f"{source}_bad_{ts}.jsonl"
+    with out.open("w", encoding="utf-8") as f:
+        for r in rows:
+            f.write(json.dumps(r, ensure_ascii=False) + "\n")
+
+
+# -------------------------
+# Connections
+# -------------------------
+def mysql_conn():
+    host = env("MYSQL_HOST", "db")
+    port = int(env("MYSQL_INNER_PORT", "3306"))
+
+    user = env("MYSQL_ETL_USER", "root")
+    pwd  = env("MYSQL_ETL_PASSWORD", env("MYSQL_ROOT_PASSWORD", ""))
+    db1  = env("MYSQL_ETL_DB", "aiu_urms_ext")
+
+    # Retry to avoid "connection refused" while MySQL is still starting
+    last_err = None
+    for _ in range(40):
+        try:
+            conn = pymysql.connect(
+                host=host, port=port, user=user, password=pwd,
+                autocommit=False, charset="utf8mb4",
+                cursorclass=pymysql.cursors.DictCursor
+            )
+            with conn.cursor() as cur:
+                cur.execute(f"CREATE DATABASE IF NOT EXISTS `{db1}`;")
+                cur.execute(f"USE `{db1}`;")
+            conn.commit()
+            return conn, db1
+        except Exception as e:
+            last_err = e
+            time.sleep(2)
+
+    raise RuntimeError(f"MySQL not reachable on {host}:{port} after retries: {last_err}")
+
+
+def ensure_mysql_tables(conn) -> None:
+    # Align with mysql/init/01_schema.sql for these three tables
+    ddl = [
+        """
+        CREATE TABLE IF NOT EXISTS departments (
+  department_id INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+  name VARCHAR(100) NOT NULL,
+  CONSTRAINT uq_departments_name UNIQUE (name)
+) ENGINE=InnoDB;
+        """,
+        """
+        CREATE TABLE IF NOT EXISTS students (
+          student_id INT UNSIGNED NOT NULL AUTO_INCREMENT,
+          department_id INT UNSIGNED NOT NULL,
+          reg_no VARCHAR(50) NOT NULL,
+          first_name VARCHAR(100) NOT NULL,
+          last_name VARCHAR(100) NOT NULL,
+          email VARCHAR(150) NOT NULL,
+          enrollment_year YEAR NOT NULL,
+          status ENUM('active','inactive','graduated') DEFAULT 'active',
+          PRIMARY KEY (student_id),
+          UNIQUE KEY uq_student_reg (reg_no),
+          UNIQUE KEY uq_student_email (email),
+          KEY idx_student_dept (department_id),
+          CONSTRAINT fk_students_department FOREIGN KEY (department_id)
+            REFERENCES departments(department_id) ON DELETE RESTRICT ON UPDATE CASCADE
+        ) ENGINE=InnoDB;
+        """,
+        """
+        CREATE TABLE IF NOT EXISTS activity_logs (
+          id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+          student_id INT UNSIGNED NOT NULL,
+          activity_type VARCHAR(50) NOT NULL,
+          resource_id BIGINT NULL,
+          `timestamp` DATETIME NOT NULL,
+          session_duration INT UNSIGNED DEFAULT 0,
+          ip_address VARCHAR(45),
+          PRIMARY KEY (id),
+          KEY idx_activity_student_time (student_id, `timestamp`),
+          CONSTRAINT fk_activity_student FOREIGN KEY (student_id)
+            REFERENCES students(student_id) ON DELETE CASCADE ON UPDATE CASCADE
+        ) ENGINE=InnoDB;
+        """
+    ]
+    with conn.cursor() as cur:
+        for q in ddl:
+            cur.execute(q)
+    conn.commit()
+
+
+def mongo_conn():
+    host = env("MONGO_HOST", "mongo")
+    port = int(env("MONGO_INNER_PORT", "27017"))
+    user = env("MONGO_INITDB_ROOT_USERNAME", "root")
+    pwd  = env("MONGO_INITDB_ROOT_PASSWORD", "rootpass")
+    client = MongoClient(f"mongodb://{user}:{pwd}@{host}:{port}/admin")
+    db = client["aiu_smartcampus"]
+    return client, db
+
+
+def clickhouse_client():
+    host = env("CLICKHOUSE_HOST", "clickhouse")
+    port = int(env("CLICKHOUSE_PORT", "8123"))
+    user = env("CLICKHOUSE_USER", "ch_admin")
+    pwd  = env("CLICKHOUSE_PASSWORD", "chpass123")
+    db   = env("CLICKHOUSE_DB", "aiu_timeseries")
+    return clickhouse_connect.get_client(host=host, port=port, username=user, password=pwd, database=db, secure=False)
+
+
+def neo4j_driver():
+    host = env("NEO4J_HOST", "neo4j")
+    port = int(env("NEO4J_BOLT_INNER_PORT", "7687"))
+    auth = env("NEO4J_AUTH", "neo4j/neo4jpass123")
+    neo_user, neo_pass = auth.split("/", 1)
+    uri = f"bolt://{host}:{port}"
+    return GraphDatabase.driver(uri, auth=(neo_user, neo_pass))
+
+
+# -------------------------
+# ETL: student profiles
+# -------------------------
+def _split_name(full_name: str) -> Tuple[str, str]:
+    parts = (full_name or "").strip().split()
+    if not parts:
+        return "Unknown", "Unknown"
+    first = parts[0]
+    last  = " ".join(parts[1:]) if len(parts) > 1 else "Unknown"
+    return first, last
+
+
+def etl_student_profiles(cp: Dict[str, int], mysql, mongo_db) -> Tuple[int, int]:
+    src = INBOX / "student_profiles.jsonl"
+    last = cp.get("student_profiles.jsonl", 0)
+    text, newpos = read_new_bytes(src, last)
+    if not text.strip():
+        cp["student_profiles.jsonl"] = newpos
+        return 0, 0
+
+    ok: List[Dict[str, Any]] = []
+    bad: List[Dict[str, Any]] = []
+
+    for line in text.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            doc = json.loads(line)
+
+            # required from your input
+            for k in ("student_id", "reg_no", "full_name", "department", "year_of_study", "email"):
+                if k not in doc or doc[k] in (None, ""):
+                    raise ValueError(f"missing {k}")
+
+            doc["student_id"] = int(doc["student_id"])
+            doc["year_of_study"] = int(doc["year_of_study"])
+            ok.append(doc)
+
+        except Exception as e:
+            bad.append({"raw": line, "error": str(e)})
+
+    if bad:
+        write_bad("student_profiles", bad)
+
+    # ---- Mongo upsert (MUST satisfy student_profiles validator) ----
+    # Validator requires: student_id, reg_no, name{first,last}, email, department_name, status, preferences{notifications{email,sms,in_app}, ui{theme,language}}
+    mongo_ok = 0
+    for d in ok:
+        first, lastn = _split_name(d.get("full_name", ""))
+        mongo_doc = {
+            "student_id": d["student_id"],
+            "reg_no": d["reg_no"],
+            "name": {"first": first, "last": lastn},
+            "email": d["email"],
+            "department_name": d["department"],
+            "status": "active",
+            "preferences": {
+                "notifications": {"email": True, "sms": False, "in_app": True},
+                "ui": {"theme": "light", "language": "en"}
+            },
+            # extras allowed (validator doesn’t forbid)
+            "phone": d.get("phone"),
+            "year_of_study": d.get("year_of_study")
+        }
+
+        try:
+            mongo_db["student_profiles"].update_one(
+                {"student_id": mongo_doc["student_id"]},
+                {"$set": mongo_doc},
+                upsert=True
+            )
+            mongo_ok += 1
+        except Exception as e:
+            write_bad("student_profiles_mongo", [{"raw": mongo_doc, "error": str(e)}])
+
+    # ---- MySQL upsert (departments + students) ----
+    inserted = 0
+    with mysql.cursor() as cur:
+        dept_names = sorted({d["department"] for d in ok})
+        for name in dept_names:
+            cur.execute("INSERT IGNORE INTO departments(name) VALUES (%s);", (name,))
+
+        cur.execute("SELECT department_id, name FROM departments;")
+        dept_map = {r["name"]: r["department_id"] for r in cur.fetchall()}
+
+        for d in ok:
+            dept_id = dept_map[d["department"]]
+            first, lastn = _split_name(d.get("full_name", ""))
+
+            yos = int(d["year_of_study"])
+            enrollment_year = datetime.now(timezone.utc).year - max(yos - 1, 0)
+
+            cur.execute(
+                """
+                INSERT INTO students(student_id, department_id, reg_no, first_name, last_name, email, enrollment_year, status)
+                VALUES (%s,%s,%s,%s,%s,%s,%s,'active')
+                ON DUPLICATE KEY UPDATE
+                  department_id=VALUES(department_id),
+                  reg_no=VALUES(reg_no),
+                  first_name=VALUES(first_name),
+                  last_name=VALUES(last_name),
+                  email=VALUES(email),
+                  enrollment_year=VALUES(enrollment_year),
+                  status=VALUES(status);
+                """,
+                (d["student_id"], dept_id, d["reg_no"], first, lastn, d["email"], enrollment_year)
+            )
+            inserted += 1
+
+    mysql.commit()
+    cp["student_profiles.jsonl"] = newpos
+    return inserted, len(bad)
+
+
+# -------------------------
+# ETL: activity logs
+# -------------------------
+def etl_activity_logs(cp: Dict[str, int], mysql) -> Tuple[int, int]:
+    src = INBOX / "activity_logs.csv"
+    last = cp.get("activity_logs.csv", 0)
+    text, newpos = read_new_bytes(src, last)
+    if not text.strip():
+        cp["activity_logs.csv"] = newpos
+        return 0, 0
+
+    ok_rows: List[Tuple[Any, ...]] = []
+    bad: List[Dict[str, Any]] = []
+
+    rdr = csv.DictReader(text.splitlines())
+    for r in rdr:
+        try:
+            sid = int(r["student_id"])
+            at  = (r.get("activity_type") or "").strip()
+            if at not in ("login", "logout", "view_material", "submit_assignment"):
+                raise ValueError("bad activity_type")
+
+            ts = datetime.strptime((r.get("timestamp") or "").strip(), "%Y-%m-%d %H:%M:%S")
+            dur = int(r.get("session_duration") or 0)
+            ip = (r.get("ip_address") or "").strip() or "0.0.0.0"
+
+            rid_raw = (r.get("resource_id") or "").strip()
+            rid = int(rid_raw) if rid_raw.isdigit() else None  # numeric-only, else NULL
+
+            ok_rows.append((sid, at, rid, ts.strftime("%Y-%m-%d %H:%M:%S"), dur, ip))
+        except Exception as e:
+            bad.append({"raw": r, "error": str(e)})
+
+    if bad:
+        write_bad("activity_logs", bad)
+
+    if ok_rows:
+        with mysql.cursor() as cur:
+            cur.executemany(
+                """
+                INSERT INTO activity_logs(student_id, activity_type, resource_id, `timestamp`, session_duration, ip_address)
+                VALUES (%s,%s,%s,%s,%s,%s);
+                """,
+                ok_rows
+            )
+        mysql.commit()
+
+    cp["activity_logs.csv"] = newpos
+    return len(ok_rows), len(bad)
+
+
+# -------------------------
+# ETL: ClickHouse sensor readings
+# -------------------------
+def etl_sensor_readings(cp: Dict[str, int], ch) -> Tuple[int, int]:
+    src = INBOX / "sensor_readings.csv"
+    last = cp.get("sensor_readings.csv", 0)
+    text, newpos = read_new_bytes(src, last)
+    if not text.strip():
+        cp["sensor_readings.csv"] = newpos
+        return 0, 0
+
+    ok: List[Tuple[Any, ...]] = []
+    bad: List[Dict[str, Any]] = []
+
+    rdr = csv.DictReader(text.splitlines())
+    for r in rdr:
+        try:
+            ok.append((
+                int(r["sensor_id"]),
+                int(r["room_id"]),
+                (r["sensor_type"] or "").strip(),
+                (r["ts"] or "").strip(),
+                float(r["value"]),
+                (r.get("status") or "ok").strip(),
+            ))
+        except Exception as e:
+            bad.append({"raw": r, "error": str(e)})
+
+    if bad:
+        write_bad("sensor_readings", bad)
+
+    if ok:
+        ch.insert(
+            "aiu_timeseries.sensor_readings_raw",
+            ok,
+            column_names=["sensor_id", "room_id", "sensor_type", "ts", "value", "status"],
+        )
+
+    cp["sensor_readings.csv"] = newpos
+    return len(ok), len(bad)
+
+
+# -------------------------
+# ETL: Neo4j club memberships
+# -------------------------
+def etl_club_memberships(cp: Dict[str, int], driver) -> Tuple[int, int]:
+    src = INBOX / "club_memberships.csv"
+    last = cp.get("club_memberships.csv", 0)
+    text, newpos = read_new_bytes(src, last)
+    if not text.strip():
+        cp["club_memberships.csv"] = newpos
+        return 0, 0
+
+    ok: List[Dict[str, str]] = []
+    bad: List[Dict[str, Any]] = []
+
+    rdr = csv.DictReader(text.splitlines())
+    for r in rdr:
+        try:
+            reg = (r.get("reg_no") or "").strip()
+            club = (r.get("club") or "").strip()
+            if not reg or not club:
+                raise ValueError("missing reg_no/club")
+            ok.append({"reg_no": reg, "club": club})
+        except Exception as e:
+            bad.append({"raw": r, "error": str(e)})
+
+    if bad:
+        write_bad("club_memberships", bad)
+
+    if ok:
+        q = """
+        UNWIND $rows AS row
+        MERGE (s:Student {reg_no: row.reg_no})
+        MERGE (c:Club {name: row.club})
+        MERGE (s)-[:MEMBER_OF]->(c);
+        """
+        with driver.session() as sess:
+            sess.execute_write(lambda tx: tx.run(q, rows=ok).consume())
+
+    cp["club_memberships.csv"] = newpos
+    return len(ok), len(bad)
+
+
+def main() -> int:
+    print("=== C1 ETL START ===")
+    cp = load_checkpoint()
+
+    mysql, mysql_db = mysql_conn()
+    ensure_mysql_tables(mysql)
+
+    mongo_client, mongo_db = mongo_conn()
+    ch = clickhouse_client()
+    neo = neo4j_driver()
+
+    try:
+        sp_ok, sp_bad = etl_student_profiles(cp, mysql, mongo_db)
+        al_ok, al_bad = etl_activity_logs(cp, mysql)
+        sr_ok, sr_bad = etl_sensor_readings(cp, ch)
+        cm_ok, cm_bad = etl_club_memberships(cp, neo)
+
+        save_checkpoint(cp)
+
+        # proof counts
+        with mysql.cursor() as cur:
+            cur.execute("SELECT COUNT(*) AS n FROM departments;")
+            dept_n = cur.fetchone()["n"]
+            cur.execute("SELECT COUNT(*) AS n FROM students;")
+            stu_n = cur.fetchone()["n"]
+            cur.execute("SELECT COUNT(*) AS n FROM activity_logs;")
+            log_n = cur.fetchone()["n"]
+
+        mongo_n = mongo_db["student_profiles"].count_documents({})
+        ch_n = ch.query("SELECT count() FROM aiu_timeseries.sensor_readings_raw").result_rows[0][0]
+
+        with neo.session() as sess:
+            neo_students = sess.run("MATCH (s:Student) RETURN count(s) AS n").single()["n"]
+            neo_clubs = sess.run("MATCH (c:Club) RETURN count(c) AS n").single()["n"]
+
+        print("--- ETL RESULT ---")
+        print(f"MySQL db={mysql_db} departments={dept_n} students={stu_n} activity_logs={log_n}")
+        print(f"Mongo student_profiles={mongo_n}")
+        print(f"ClickHouse sensor_readings_raw={ch_n}")
+        print(f"Neo4j Students={neo_students} Clubs={neo_clubs}")
+
+        print("--- BATCH STATS ---")
+        print(f"student_profiles ok={sp_ok} bad={sp_bad}")
+        print(f"activity_logs    ok={al_ok} bad={al_bad}")
+        print(f"sensor_readings  ok={sr_ok} bad={sr_bad}")
+        print(f"club_memberships ok={cm_ok} bad={cm_bad}")
+
+        print("=== C1 ETL END ===")
+        return 0
+
+    finally:
+        try: mysql.close()
+        except: pass
+        try: mongo_client.close()
+        except: pass
+        try: neo.close()
+        except: pass
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
+

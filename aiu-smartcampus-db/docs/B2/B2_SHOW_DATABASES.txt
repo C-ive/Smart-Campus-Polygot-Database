@@ -1,0 +1,5 @@
+﻿INFORMATION_SCHEMA
+aiu_timeseries
+default
+information_schema
+system

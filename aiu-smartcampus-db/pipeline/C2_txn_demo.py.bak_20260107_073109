@@ -1,0 +1,650 @@
+﻿#!/usr/bin/env python3
+"""
+C2_txn_demo.py — Advanced Transaction Management Demo (MySQL + MongoDB)
+
+DEMO REQUIREMENTS (per rubric):
+1) Lost Update problem in high-concurrency enrollment (and fix it)
+2) Two-Phase Commit (2PC) pattern for cross-database consistency (and recovery)
+3) Compensating transactions (Saga) for rollback scenarios
+
+Outputs are proof-friendly (prints states + results).
+"""
+
+from __future__ import annotations
+
+import os
+import time
+import uuid
+import threading
+from datetime import datetime, timezone
+from typing import Any, Dict, List, Tuple
+
+import pymysql
+from pymongo import MongoClient
+
+
+# -------------------------
+# Helpers
+# -------------------------
+def env(name: str, default: str = "") -> str:
+    v = os.environ.get(name)
+    return v if v not in (None, "") else default
+
+def utc_now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+# -------------------------
+# Connections
+# -------------------------
+def mysql_connect():
+    host = env("MYSQL_HOST", "db")
+    port = int(env("MYSQL_INNER_PORT", "3306"))
+    user = env("MYSQL_ETL_USER", "root")
+    pwd  = env("MYSQL_ETL_PASSWORD", env("MYSQL_ROOT_PASSWORD", ""))
+    db1  = env("MYSQL_ETL_DB", "aiu_urms_ext")
+
+    last_err = None
+    for _ in range(40):
+        try:
+            conn = pymysql.connect(
+                host=host, port=port, user=user, password=pwd, database=db1,
+                autocommit=False, charset="utf8mb4",
+                cursorclass=pymysql.cursors.DictCursor,
+            )
+            return conn
+        except Exception as e:
+            last_err = e
+            time.sleep(2)
+    raise RuntimeError(f"MySQL not reachable on {host}:{port} after retries: {last_err}")
+
+def mongo_connect():
+    host = env("MONGO_HOST", "mongo")
+    port = int(env("MONGO_INNER_PORT", "27017"))
+    user = env("MONGO_INITDB_ROOT_USERNAME", "root")
+    pwd  = env("MONGO_INITDB_ROOT_PASSWORD", "rootpass")
+    client = MongoClient(f"mongodb://{user}:{pwd}@{host}:{port}/admin")
+    return client, client["aiu_smartcampus"]
+
+
+# -------------------------
+# Demo schema (MySQL)
+# -------------------------
+def ensure_demo_tables(mysql) -> None:
+    with mysql.cursor() as cur:
+        # Seat counter table used ONLY for lost-update demonstration
+        cur.execute("""
+        CREATE TABLE IF NOT EXISTS course_seats_demo (
+          course_id INT UNSIGNED NOT NULL PRIMARY KEY,
+          capacity INT UNSIGNED NOT NULL,
+          enrolled INT UNSIGNED NOT NULL DEFAULT 0,
+          updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+        ) ENGINE=InnoDB;
+        """)
+
+        # 2PC coordinator log + intent/outbox
+        cur.execute("""
+        CREATE TABLE IF NOT EXISTS distributed_tx_log (
+          tx_id CHAR(36) NOT NULL PRIMARY KEY,
+          student_id INT UNSIGNED NOT NULL,
+          course_id INT UNSIGNED NOT NULL,
+          course_code VARCHAR(20) NOT NULL,
+          status VARCHAR(32) NOT NULL,
+          mysql_prepared TINYINT(1) NOT NULL DEFAULT 0,
+          mongo_prepared TINYINT(1) NOT NULL DEFAULT 0,
+          mysql_committed TINYINT(1) NOT NULL DEFAULT 0,
+          mongo_committed TINYINT(1) NOT NULL DEFAULT 0,
+          last_error TEXT NULL,
+          created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+          updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+          KEY idx_tx_status (status),
+          KEY idx_tx_student (student_id),
+          KEY idx_tx_course (course_id)
+        ) ENGINE=InnoDB;
+        """)
+
+        cur.execute("""
+        CREATE TABLE IF NOT EXISTS enrollment_intents (
+          tx_id CHAR(36) NOT NULL PRIMARY KEY,
+          student_id INT UNSIGNED NOT NULL,
+          course_id INT UNSIGNED NOT NULL,
+          created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+        ) ENGINE=InnoDB;
+        """)
+    mysql.commit()
+
+
+# -------------------------
+# Demo entities
+# -------------------------
+def ensure_demo_course(mysql, course_code="TXN501") -> Tuple[int, str]:
+    """
+    Create a known demo course if missing, return (course_id, course_code).
+    Uses existing schema: departments(name), courses(...)
+    """
+    with mysql.cursor() as cur:
+        # ensure department
+        cur.execute("INSERT IGNORE INTO departments(name) VALUES (%s)", ("Computing",))
+        cur.execute("SELECT department_id FROM departments WHERE name=%s", ("Computing",))
+        dept_id = cur.fetchone()["department_id"]
+
+        # ensure course
+        cur.execute("""
+        INSERT INTO courses(course_code, course_name, credits, level, department_id, lecturer_id, semester)
+        VALUES (%s,%s,%s,%s,%s,NULL,%s)
+        ON DUPLICATE KEY UPDATE course_name=VALUES(course_name)
+        """, (course_code, "Advanced Transaction Systems (Demo)", 3, "Postgraduate", dept_id, 1))
+
+        cur.execute("SELECT course_id FROM courses WHERE course_code=%s", (course_code,))
+        course_id = cur.fetchone()["course_id"]
+    mysql.commit()
+    return course_id, course_code
+
+
+def pick_two_students(mysql) -> List[Dict[str, Any]]:
+    """
+    Picks 2 students from MySQL (guaranteed to exist).
+    """
+    with mysql.cursor() as cur:
+        cur.execute("""
+        SELECT s.student_id, s.reg_no, s.email, s.first_name, s.last_name, d.name AS department_name
+        FROM students s
+        JOIN departments d ON d.department_id = s.department_id
+        ORDER BY s.student_id
+        LIMIT 2
+        """)
+        rows = cur.fetchall()
+    if len(rows) < 2:
+        raise RuntimeError("Need at least 2 students in MySQL for concurrency demo.")
+    return rows
+
+
+def ensure_mongo_profile(mongo_db, student: Dict[str, Any]) -> None:
+    """
+    Writes a validator-compatible document (required fields present).
+    Note: validator expects preferences.notifications.email/sms/push, and preferences.ui.theme/language.
+    """
+    doc = {
+        "student_id": int(student["student_id"]),
+        "reg_no": student["reg_no"],
+        "name": {"first": student["first_name"], "last": student["last_name"]},
+        "email": student["email"],
+        "department_name": student["department_name"],
+        "status": "active",
+        "preferences": {
+            "notifications": {"email": True, "sms": False, "push": True},
+            "ui": {"theme": "light", "language": "en"},
+        },
+        # extra fields allowed
+        "enrolled_courses": [],
+        "updated_at": utc_now_iso(),
+    }
+    mongo_db["student_profiles"].update_one(
+        {"student_id": doc["student_id"]},
+        {"$set": doc},
+        upsert=True
+    )
+
+
+# -------------------------
+# State helpers
+# -------------------------
+def mysql_enrollment_count(mysql, course_id: int) -> int:
+    with mysql.cursor() as cur:
+        cur.execute("SELECT COUNT(*) AS n FROM enrollments WHERE course_id=%s", (course_id,))
+        return int(cur.fetchone()["n"])
+
+def mysql_seat_value(mysql, course_id: int) -> Tuple[int, int]:
+    with mysql.cursor() as cur:
+        cur.execute("SELECT capacity, enrolled FROM course_seats_demo WHERE course_id=%s", (course_id,))
+        r = cur.fetchone()
+        return int(r["capacity"]), int(r["enrolled"])
+
+def mongo_courses(mongo_db, student_id: int) -> List[str]:
+    doc = mongo_db["student_profiles"].find_one({"student_id": int(student_id)}, {"_id": 0, "enrolled_courses": 1})
+    return (doc or {}).get("enrolled_courses", []) or []
+
+
+# -------------------------
+# Cleanup
+# -------------------------
+def cleanup(mysql, mongo_db, student_ids: List[int], course_id: int, course_code: str) -> None:
+    with mysql.cursor() as cur:
+        cur.execute("DELETE FROM enrollments WHERE course_id=%s AND student_id IN (%s,%s)", (course_id, student_ids[0], student_ids[1]))
+        cur.execute("DELETE FROM course_seats_demo WHERE course_id=%s", (course_id,))
+        cur.execute("DELETE FROM enrollment_intents WHERE course_id=%s AND student_id IN (%s,%s)", (course_id, student_ids[0], student_ids[1]))
+        cur.execute("DELETE FROM distributed_tx_log WHERE course_id=%s AND student_id IN (%s,%s)", (course_id, student_ids[0], student_ids[1]))
+    mysql.commit()
+
+    mongo_db["student_profiles"].update_many(
+        {"student_id": {"$in": [int(student_ids[0]), int(student_ids[1])] }},
+        {"$pull": {"enrolled_courses": course_code}}
+    )
+    mongo_db["tx_prepares"].delete_many({"course_code": course_code, "student_id": {"$in": [int(student_ids[0]), int(student_ids[1])] }})
+
+
+# -------------------------
+# 1) LOST UPDATE DEMO
+# -------------------------
+def setup_seats(mysql, course_id: int, capacity: int = 99) -> None:
+    with mysql.cursor() as cur:
+        cur.execute("""
+        INSERT INTO course_seats_demo(course_id, capacity, enrolled)
+        VALUES (%s,%s,0)
+        ON DUPLICATE KEY UPDATE capacity=VALUES(capacity), enrolled=0
+        """, (course_id, capacity))
+    mysql.commit()
+
+def enroll_naive_lost_update(student_id: int, course_id: int, barrier: threading.Barrier, results: Dict[str, Any]) -> None:
+    mysql = mysql_connect()
+    try:
+        with mysql.cursor() as cur:
+            cur.execute("SET SESSION TRANSACTION ISOLATION LEVEL READ COMMITTED;")
+        mysql.commit()
+
+        barrier.wait()  # start together
+
+        with mysql.cursor() as cur:
+            cur.execute("START TRANSACTION;")
+
+            # Insert enrollment (two different students -> no PK conflict)
+            cur.execute("""
+            INSERT INTO enrollments(student_id, course_id, status)
+            VALUES (%s,%s,'enrolled')
+            """, (student_id, course_id))
+
+            # Read current seat count
+            cur.execute("SELECT enrolled FROM course_seats_demo WHERE course_id=%s", (course_id,))
+            old = int(cur.fetchone()["enrolled"])
+
+            # widen race window
+            time.sleep(1.2)
+
+            # LOST UPDATE: set = old+1 (overwrites other txn increment)
+            cur.execute("UPDATE course_seats_demo SET enrolled=%s WHERE course_id=%s", (old + 1, course_id))
+
+            cur.execute("COMMIT;")
+
+        results[str(student_id)] = "ok"
+    except Exception as e:
+        try:
+            mysql.rollback()
+        except:
+            pass
+        results[str(student_id)] = f"error: {e}"
+    finally:
+        try:
+            mysql.close()
+        except:
+            pass
+
+
+def enroll_fixed_with_lock(student_id: int, course_id: int, barrier: threading.Barrier, results: Dict[str, Any]) -> None:
+    mysql = mysql_connect()
+    try:
+        with mysql.cursor() as cur:
+            cur.execute("SET SESSION TRANSACTION ISOLATION LEVEL READ COMMITTED;")
+        mysql.commit()
+
+        barrier.wait()
+
+        with mysql.cursor() as cur:
+            cur.execute("START TRANSACTION;")
+
+            cur.execute("""
+            INSERT INTO enrollments(student_id, course_id, status)
+            VALUES (%s,%s,'enrolled')
+            """, (student_id, course_id))
+
+            # FIX: lock the seat row so second txn waits and reads latest value
+            cur.execute("SELECT enrolled FROM course_seats_demo WHERE course_id=%s FOR UPDATE", (course_id,))
+            old = int(cur.fetchone()["enrolled"])
+            time.sleep(1.2)
+            cur.execute("UPDATE course_seats_demo SET enrolled=%s WHERE course_id=%s", (old + 1, course_id))
+
+            cur.execute("COMMIT;")
+
+        results[str(student_id)] = "ok"
+    except Exception as e:
+        try:
+            mysql.rollback()
+        except:
+            pass
+        results[str(student_id)] = f"error: {e}"
+    finally:
+        try:
+            mysql.close()
+        except:
+            pass
+
+
+def demo_lost_update(mysql, course_id: int, student_ids: List[int]) -> None:
+    print("\n==============================")
+    print("DEMO 1: LOST UPDATE (and fix)")
+    print("==============================")
+
+    # A) show lost update
+    setup_seats(mysql, course_id, capacity=99)
+    results: Dict[str, Any] = {}
+    barrier = threading.Barrier(2)
+
+    t1 = threading.Thread(target=enroll_naive_lost_update, args=(student_ids[0], course_id, barrier, results))
+    t2 = threading.Thread(target=enroll_naive_lost_update, args=(student_ids[1], course_id, barrier, results))
+    t1.start(); t2.start(); t1.join(); t2.join()
+
+    enroll_n = mysql_enrollment_count(mysql, course_id)
+    cap, seats = mysql_seat_value(mysql, course_id)
+
+    print(f"[NAIVE] thread results: {results}")
+    print(f"[NAIVE] enrollments rows={enroll_n} (expected 2)")
+    print(f"[NAIVE] seats enrolled={seats} (LOST UPDATE -> often 1, expected 2)")
+
+    # cleanup enrollment rows + reset seats
+    with mysql.cursor() as cur:
+        cur.execute("DELETE FROM enrollments WHERE course_id=%s AND student_id IN (%s,%s)", (course_id, student_ids[0], student_ids[1]))
+        cur.execute("UPDATE course_seats_demo SET enrolled=0 WHERE course_id=%s", (course_id,))
+    mysql.commit()
+
+    # B) fix with row lock
+    results2: Dict[str, Any] = {}
+    barrier2 = threading.Barrier(2)
+    t3 = threading.Thread(target=enroll_fixed_with_lock, args=(student_ids[0], course_id, barrier2, results2))
+    t4 = threading.Thread(target=enroll_fixed_with_lock, args=(student_ids[1], course_id, barrier2, results2))
+    t3.start(); t4.start(); t3.join(); t4.join()
+
+    enroll_n2 = mysql_enrollment_count(mysql, course_id)
+    cap2, seats2 = mysql_seat_value(mysql, course_id)
+
+    print(f"[FIXED] thread results: {results2}")
+    print(f"[FIXED] enrollments rows={enroll_n2} (expected 2)")
+    print(f"[FIXED] seats enrolled={seats2} (expected 2)")
+
+
+# -------------------------
+# 2) TWO-PHASE COMMIT (2PC) PATTERN DEMO
+# -------------------------
+def mysql_prepare_tx(mysql, tx_id: str, student_id: int, course_id: int, course_code: str) -> None:
+    with mysql.cursor() as cur:
+        cur.execute("START TRANSACTION;")
+        cur.execute("""
+        INSERT INTO distributed_tx_log(tx_id, student_id, course_id, course_code, status, mysql_prepared, mongo_prepared)
+        VALUES (%s,%s,%s,%s,'PREPARED',1,0)
+        ON DUPLICATE KEY UPDATE
+          status='PREPARED',
+          mysql_prepared=1,
+          updated_at=CURRENT_TIMESTAMP
+        """, (tx_id, student_id, course_id, course_code))
+
+        cur.execute("""
+        INSERT INTO enrollment_intents(tx_id, student_id, course_id)
+        VALUES (%s,%s,%s)
+        ON DUPLICATE KEY UPDATE student_id=VALUES(student_id), course_id=VALUES(course_id)
+        """, (tx_id, student_id, course_id))
+
+        cur.execute("COMMIT;")
+
+def mongo_prepare_tx(mongo_db, tx_id: str, student_id: int, course_code: str) -> None:
+    mongo_db["tx_prepares"].update_one(
+        {"tx_id": tx_id},
+        {"$set": {
+            "tx_id": tx_id,
+            "student_id": int(student_id),
+            "course_code": course_code,
+            "status": "PREPARED",
+            "prepared_at": utc_now_iso(),
+        }},
+        upsert=True
+    )
+
+def mysql_mark_mongo_prepared(mysql, tx_id: str) -> None:
+    with mysql.cursor() as cur:
+        cur.execute("""
+        UPDATE distributed_tx_log SET mongo_prepared=1, updated_at=CURRENT_TIMESTAMP
+        WHERE tx_id=%s
+        """, (tx_id,))
+    mysql.commit()
+
+def mysql_commit_tx(mysql, tx_id: str) -> None:
+    """
+    Phase 2 commit for MySQL: materialize intent -> enrollments row, mark committed.
+    """
+    with mysql.cursor() as cur:
+        cur.execute("START TRANSACTION;")
+
+        cur.execute("SELECT student_id, course_id FROM enrollment_intents WHERE tx_id=%s", (tx_id,))
+        r = cur.fetchone()
+        if not r:
+            raise RuntimeError("Missing enrollment_intents for tx_id=" + tx_id)
+
+        sid = int(r["student_id"]); cid = int(r["course_id"])
+
+        # insert enrollment (idempotent)
+        cur.execute("""
+        INSERT IGNORE INTO enrollments(student_id, course_id, status)
+        VALUES (%s,%s,'enrolled')
+        """, (sid, cid))
+
+        cur.execute("""
+        UPDATE distributed_tx_log
+        SET status='COMMITTED_MYSQL', mysql_committed=1, updated_at=CURRENT_TIMESTAMP
+        WHERE tx_id=%s
+        """, (tx_id,))
+
+        cur.execute("COMMIT;")
+
+def mongo_commit_tx(mongo_db, tx_id: str, student_id: int, course_code: str) -> None:
+    """
+    Phase 2 commit for Mongo: add course to profile, mark committed.
+    """
+    mongo_db["student_profiles"].update_one(
+        {"student_id": int(student_id)},
+        {"$addToSet": {"enrolled_courses": course_code}, "$set": {"updated_at": utc_now_iso()}},
+        upsert=False
+    )
+    mongo_db["tx_prepares"].update_one(
+        {"tx_id": tx_id},
+        {"$set": {"status": "COMMITTED_MONGO", "committed_at": utc_now_iso()}}
+    )
+
+def mysql_mark_mongo_committed(mysql, tx_id: str) -> None:
+    with mysql.cursor() as cur:
+        cur.execute("""
+        UPDATE distributed_tx_log
+        SET status='COMMITTED_BOTH', mongo_committed=1, updated_at=CURRENT_TIMESTAMP
+        WHERE tx_id=%s
+        """, (tx_id,))
+    mysql.commit()
+
+def print_2pc_state(mysql, mongo_db, tx_id: str, student_id: int, course_id: int, course_code: str) -> None:
+    with mysql.cursor() as cur:
+        cur.execute("SELECT * FROM distributed_tx_log WHERE tx_id=%s", (tx_id,))
+        row = cur.fetchone()
+    tx_doc = mongo_db["tx_prepares"].find_one({"tx_id": tx_id}, {"_id": 0})
+    enroll_n = 0
+    with mysql.cursor() as cur:
+        cur.execute("SELECT COUNT(*) AS n FROM enrollments WHERE student_id=%s AND course_id=%s", (student_id, course_id))
+        enroll_n = int(cur.fetchone()["n"])
+    courses = mongo_courses(mongo_db, student_id)
+
+    print(f"2PC STATE: mysql_log={ {k: row[k] for k in ('status','mysql_prepared','mongo_prepared','mysql_committed','mongo_committed') } if row else None }")
+    print(f"2PC STATE: mongo_tx={tx_doc}")
+    print(f"2PC STATE: MySQL enrollment_row={enroll_n} | Mongo enrolled_courses contains '{course_code}'? {course_code in courses}")
+
+def recover_2pc(mysql, mongo_db, tx_id: str) -> None:
+    """
+    Simple recovery scan for THIS tx_id:
+    - If MySQL committed but Mongo not, commit Mongo and mark COMMITTED_BOTH
+    - If Mongo committed but MySQL not, commit MySQL and mark COMMITTED_BOTH
+    """
+    with mysql.cursor() as cur:
+        cur.execute("SELECT * FROM distributed_tx_log WHERE tx_id=%s", (tx_id,))
+        row = cur.fetchone()
+    if not row:
+        print("RECOVERY: no mysql tx log found.")
+        return
+
+    tx_doc = mongo_db["tx_prepares"].find_one({"tx_id": tx_id}, {"_id": 0}) or {}
+    status_mysql = row.get("status")
+    mysql_committed = int(row.get("mysql_committed") or 0)
+    mongo_committed = int(row.get("mongo_committed") or 0)
+
+    sid = int(row["student_id"])
+    cid = int(row["course_id"])
+    code = row["course_code"]
+
+    print("RECOVERY: starting...")
+    if mysql_committed == 1 and (tx_doc.get("status") != "COMMITTED_MONGO"):
+        print("RECOVERY: MySQL committed but Mongo not -> committing Mongo now...")
+        mongo_commit_tx(mongo_db, tx_id, sid, code)
+        mysql_mark_mongo_committed(mysql, tx_id)
+
+    elif (tx_doc.get("status") == "COMMITTED_MONGO") and mysql_committed == 0:
+        print("RECOVERY: Mongo committed but MySQL not -> committing MySQL now...")
+        mysql_commit_tx(mysql, tx_id)
+        mysql_mark_mongo_committed(mysql, tx_id)
+
+    else:
+        # If both committed already, just ensure mysql flag is set
+        if mysql_committed == 1 and mongo_committed == 0 and tx_doc.get("status") == "COMMITTED_MONGO":
+            mysql_mark_mongo_committed(mysql, tx_id)
+
+    print("RECOVERY: done.")
+
+
+def demo_2pc(mysql, mongo_db, student_id: int, course_id: int, course_code: str) -> None:
+    print("\n==============================")
+    print("DEMO 2: TWO-PHASE COMMIT (2PC)")
+    print("==============================")
+
+    tx_id = str(uuid.uuid4())
+
+    print(f"2PC: tx_id={tx_id}")
+    print("PHASE 1 (PREPARE): write durable 'prepare' records in BOTH databases...")
+
+    mysql_prepare_tx(mysql, tx_id, student_id, course_id, course_code)
+    mongo_prepare_tx(mongo_db, tx_id, student_id, course_code)
+    mysql_mark_mongo_prepared(mysql, tx_id)
+
+    print_2pc_state(mysql, mongo_db, tx_id, student_id, course_id, course_code)
+
+    print("\nPHASE 2 (COMMIT): commit MySQL first, then simulate failure BEFORE Mongo commit...")
+    try:
+        mysql_commit_tx(mysql, tx_id)
+        # Simulate cross-db failure window
+        raise RuntimeError("SIMULATED FAILURE between MySQL commit and Mongo commit")
+    except Exception as e:
+        with mysql.cursor() as cur:
+            cur.execute("UPDATE distributed_tx_log SET last_error=%s WHERE tx_id=%s", (str(e), tx_id))
+        mysql.commit()
+        print(f"2PC: expected failure: {e}")
+
+    print("\nSTATE AFTER FAILURE (in-doubt tx):")
+    print_2pc_state(mysql, mongo_db, tx_id, student_id, course_id, course_code)
+
+    print("\nRECOVERY: coordinator scans logs and completes missing commit step...")
+    recover_2pc(mysql, mongo_db, tx_id)
+
+    print("\nSTATE AFTER RECOVERY:")
+    print_2pc_state(mysql, mongo_db, tx_id, student_id, course_id, course_code)
+
+    print("\n2PC: now run a clean commit (no failure) with a new tx_id...")
+    tx2 = str(uuid.uuid4())
+    mysql_prepare_tx(mysql, tx2, student_id, course_id, course_code)
+    mongo_prepare_tx(mongo_db, tx2, student_id, course_code)
+    mysql_mark_mongo_prepared(mysql, tx2)
+
+    mysql_commit_tx(mysql, tx2)
+    mongo_commit_tx(mongo_db, tx2, student_id, course_code)
+    mysql_mark_mongo_committed(mysql, tx2)
+
+    print_2pc_state(mysql, mongo_db, tx2, student_id, course_id, course_code)
+
+
+# -------------------------
+# 3) SAGA / COMPENSATING TRANSACTION DEMO
+# -------------------------
+def demo_saga(mysql, mongo_db, student_id: int, course_id: int, course_code: str) -> None:
+    print("\n===========================================")
+    print("DEMO 3: COMPENSATING TRANSACTION (SAGA)")
+    print("===========================================")
+
+    # cleanup current enrollment for clean demo
+    with mysql.cursor() as cur:
+        cur.execute("DELETE FROM enrollments WHERE student_id=%s AND course_id=%s", (student_id, course_id))
+    mysql.commit()
+    mongo_db["student_profiles"].update_one({"student_id": int(student_id)}, {"$pull": {"enrolled_courses": course_code}})
+
+    print("SAGA STEP 1: Commit MySQL enrollment...")
+    with mysql.cursor() as cur:
+        cur.execute("START TRANSACTION;")
+        cur.execute("""
+        INSERT INTO enrollments(student_id, course_id, status)
+        VALUES (%s,%s,'enrolled')
+        """, (student_id, course_id))
+        cur.execute("COMMIT;")
+    print("MySQL committed enrollment ✅")
+
+    print("SAGA STEP 2: Simulate Mongo failure during profile update...")
+    try:
+        raise RuntimeError("SIMULATED Mongo write failure")
+    except Exception as e:
+        print(f"Mongo failed: {e}")
+        print("SAGA COMPENSATION: delete MySQL enrollment to restore consistency...")
+        with mysql.cursor() as cur:
+            cur.execute("START TRANSACTION;")
+            cur.execute("DELETE FROM enrollments WHERE student_id=%s AND course_id=%s", (student_id, course_id))
+            cur.execute("COMMIT;")
+
+    # verify
+    with mysql.cursor() as cur:
+        cur.execute("SELECT COUNT(*) AS n FROM enrollments WHERE student_id=%s AND course_id=%s", (student_id, course_id))
+        n = int(cur.fetchone()["n"])
+    print(f"SAGA RESULT: enrollment_row={n} (expected 0 after compensation)")
+
+
+# -------------------------
+# MAIN
+# -------------------------
+def main() -> int:
+    print("=== C2 TRANSACTION DEMO START ===")
+
+    mysql = mysql_connect()
+    mongo_client, mongo_db = mongo_connect()
+
+    try:
+        ensure_demo_tables(mysql)
+        course_id, course_code = ensure_demo_course(mysql, "TXN501")
+
+        students = pick_two_students(mysql)
+        ensure_mongo_profile(mongo_db, students[0])
+        ensure_mongo_profile(mongo_db, students[1])
+
+        sids = [int(students[0]["student_id"]), int(students[1]["student_id"])]
+
+        print(f"Using course_id={course_id} course_code={course_code}")
+        print(f"Using students: {sids[0]} ({students[0]['reg_no']}) and {sids[1]} ({students[1]['reg_no']})")
+
+        # clean slate for demo artifacts
+        cleanup(mysql, mongo_db, sids, course_id, course_code)
+
+        # 1) Lost update (and fix)
+        demo_lost_update(mysql, course_id, sids)
+
+        # 2) 2PC pattern (prepare/commit + recovery)
+        demo_2pc(mysql, mongo_db, sids[0], course_id, course_code)
+
+        # 3) Saga compensation
+        demo_saga(mysql, mongo_db, sids[1], course_id, course_code)
+
+        print("\n=== C2 TRANSACTION DEMO END ===")
+        return 0
+
+    finally:
+        try: mysql.close()
+        except: pass
+        try: mongo_client.close()
+        except: pass
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

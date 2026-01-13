@@ -1,0 +1,6 @@
+﻿NAME             IMAGE                                  COMMAND                  SERVICE      CREATED          STATUS          PORTS
+aiu-clickhouse   clickhouse/clickhouse-server:24.8      "/entrypoint.sh"         clickhouse   2 hours ago      Up 2 hours      0.0.0.0:8125->8123/tcp, [::]:8125->8123/tcp, 0.0.0.0:9005->9000/tcp, [::]:9005->9000/tcp
+aiu-db           mysql:8.0                              "docker-entrypoint.sΓÇª"   db           22 minutes ago   Up 22 minutes   0.0.0.0:3307->3306/tcp, [::]:3307->3306/tcp
+aiu-mongo        mongo:7.0                              "docker-entrypoint.sΓÇª"   mongo        2 hours ago      Up 2 hours      0.0.0.0:27018->27017/tcp, [::]:27018->27017/tcp
+aiu-neo4j        neo4j:5.22                             "tini -g -- /startupΓÇª"   neo4j        2 minutes ago    Up 2 minutes    0.0.0.0:7475->7474/tcp, [::]:7475->7474/tcp, 0.0.0.0:7688->7687/tcp, [::]:7688->7687/tcp
+aiu-tabix        spoonest/clickhouse-tabix-web-client   "/bin/sh -c ./start.ΓÇª"   tabix        2 hours ago      Up 2 hours      0.0.0.0:8087->80/tcp, [::]:8087->80/tcp

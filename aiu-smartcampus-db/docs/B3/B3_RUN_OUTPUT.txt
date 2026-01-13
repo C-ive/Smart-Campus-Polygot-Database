@@ -1,0 +1,28 @@
+﻿stage
+"=== B3 START ==="
+stage
+"Constraints created"
+stage
+"Indexes created"
+stage
+"Seed complete"
+students
+4
+courses
+4
+departments
+3
+materials
+3
+info
+"Query1: prerequisite chain for CS501"
+info
+"Query2: club communities (members per club)"
+info
+"Query3: recommendations for Clive (peer-enrollment based)"
+info
+"Query4: influence proxy (connections via shared clubs/courses)"
+info
+"Query5: most viewed materials"
+stage
+"=== B3 END ==="

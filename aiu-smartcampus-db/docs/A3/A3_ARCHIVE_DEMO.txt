@@ -1,0 +1,11 @@
+﻿old_in_live_before	archived_before
+3	3
+old_in_live_after	archived_after
+0	6
+id	student_id	activity_type	timestamp	archived_at
+2051	1	login	2024-12-02 20:19:17.000	2026-01-06 20:19:17
+2052	1	view_material	2024-12-01 20:19:17.000	2026-01-06 20:19:17
+2053	1	logout	2024-11-30 20:19:17.000	2026-01-06 20:19:17
+2048	1	login	2024-12-02 16:22:39.000	2026-01-06 16:22:39
+2049	1	view_material	2024-12-01 16:22:39.000	2026-01-06 16:22:39
+2050	1	logout	2024-11-30 16:22:39.000	2026-01-06 16:22:39

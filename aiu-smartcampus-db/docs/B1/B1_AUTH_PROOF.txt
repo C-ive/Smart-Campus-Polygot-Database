@@ -1,0 +1,7 @@
+﻿{
+  authInfo: {
+    authenticatedUsers: [ { user: 'mongoadmin', db: 'admin' } ],
+    authenticatedUserRoles: [ { role: 'root', db: 'admin' } ]
+  },
+  ok: 1
+}

@@ -1,0 +1,11 @@
+﻿*************************** 1. row ***************************
+                View: vw_student_activity_agg
+         Create View: CREATE ALGORITHM=UNDEFINED DEFINER=`root`@`localhost` SQL SECURITY DEFINER VIEW `vw_student_activity_agg` AS select `s`.`student_id` AS `student_id`,`s`.`reg_no` AS `reg_no`,`s`.`first_name` AS `first_name`,`s`.`last_name` AS `last_name`,`d`.`name` AS `department_name`,`s`.`status` AS `status`,coalesce(`a`.`total_actions`,0) AS `total_actions`,coalesce(`a`.`total_activity_seconds`,0) AS `total_activity_seconds`,`a`.`last_activity_at` AS `last_activity_at` from ((`students` `s` join `departments` `d` on((`d`.`department_id` = `s`.`department_id`))) left join (select `activity_logs`.`student_id` AS `student_id`,count(0) AS `total_actions`,sum(`activity_logs`.`session_duration`) AS `total_activity_seconds`,max(`activity_logs`.`timestamp`) AS `last_activity_at` from `activity_logs` group by `activity_logs`.`student_id`) `a` on((`a`.`student_id` = `s`.`student_id`)))
+character_set_client: latin1
+collation_connection: latin1_swedish_ci
+student_id	reg_no	first_name	last_name	department_name	status	total_actions	total_activity_seconds	last_activity_at
+86	AIU2026-0048	Student48	Test	Theology	active	10	8050	2026-01-01 04:26:52.000
+85	AIU2026-0148	Student148	Test	Computing	active	10	7980	2026-01-02 04:27:29.000
+84	AIU2026-0049	Student49	Test	Computing	active	10	7910	2026-01-03 04:28:06.000
+83	AIU2026-0149	Student149	Test	Business	active	10	7840	2026-01-04 04:28:43.000
+82	AIU2026-0150	Student150	Test	Theology	active	10	7770	2026-01-05 04:29:20.000

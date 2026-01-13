@@ -1,0 +1,7 @@
+﻿sensor_id,room_id,sensor_type,ts,value,status
+1,101,occupancy,2026-01-07 01:20:00.000,12.3,ok
+2,101,temperature,2026-01-07 01:20:00.000,22.1,ok
+3,101,humidity,2026-01-07 01:20:00.000,58.2,ok
+4,101,energy,2026-01-07 01:20:00.000,2.4,ok
+5,102,occupancy,2026-01-07 01:20:00.000,85.5,warn
+6,102,temperature,2026-01-07 01:20:00.000,29.6,warn

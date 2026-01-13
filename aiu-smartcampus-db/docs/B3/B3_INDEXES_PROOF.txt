@@ -1,0 +1,11 @@
+﻿id, name, state, populationPercent, type, entityType, labelsOrTypes, properties, indexProvider, owningConstraint, lastRead, readCount
+7, "course_code_unique", "ONLINE", 100.0, "RANGE", "NODE", ["Course"], ["course_code"], "range-1.0", "course_code_unique", 2026-01-07T01:53:19.200Z, 65
+15, "course_dept_idx", "ONLINE", 100.0, "RANGE", "NODE", ["Course"], ["department_name"], "range-1.0", NULL, 2026-01-07T01:53:18.200Z, 15
+16, "course_text_idx", "ONLINE", 100.0, "FULLTEXT", "NODE", ["Course"], ["course_name", "description"], "fulltext-1.0", NULL, NULL, 0
+9, "dept_name_unique", "ONLINE", 100.0, "RANGE", "NODE", ["Department"], ["name"], "range-1.0", "dept_name_unique", 2026-01-07T01:53:17.992Z, 45
+1, "index_343aff4e", "ONLINE", 100.0, "LOOKUP", "NODE", NULL, NULL, "token-lookup-1.0", NULL, 2026-01-07T01:53:20.464Z, 28
+2, "index_f7700477", "ONLINE", 100.0, "LOOKUP", "RELATIONSHIP", NULL, NULL, "token-lookup-1.0", NULL, 2026-01-07T01:53:19.217Z, 119
+11, "lecturer_id_unique", "ONLINE", 100.0, "RANGE", "NODE", ["Lecturer"], ["lecturer_id"], "range-1.0", "lecturer_id_unique", 2026-01-07T01:53:18.026Z, 30
+13, "material_id_unique", "ONLINE", 100.0, "RANGE", "NODE", ["Material"], ["material_id"], "range-1.0", "material_id_unique", 2026-01-07T01:53:19.060Z, 45
+3, "student_id_unique", "ONLINE", 100.0, "RANGE", "NODE", ["Student"], ["student_id"], "range-1.0", "student_id_unique", 2026-01-07T01:53:18.336Z, 60
+5, "student_reg_unique", "ONLINE", 100.0, "RANGE", "NODE", ["Student"], ["reg_no"], "range-1.0", "student_reg_unique", 2026-01-07T01:53:19.235Z, 65

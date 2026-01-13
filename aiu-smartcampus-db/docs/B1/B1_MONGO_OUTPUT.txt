@@ -1,0 +1,243 @@
+﻿=== B1 START: Using DB = aiu_smartcampus ===
+{
+  ok: 1
+}
+Collections created:
+[
+  'course_catalogs',
+  'student_profiles'
+]
+Indexes created (course_catalogs):
+[
+  {
+    v: 2,
+    key: {
+      _id: 1
+    },
+    name: '_id_'
+  },
+  {
+    v: 2,
+    key: {
+      course_code: 1
+    },
+    name: 'course_code_1',
+    unique: true
+  },
+  {
+    v: 2,
+    key: {
+      department_name: 1,
+      credits: 1
+    },
+    name: 'department_name_1_credits_1'
+  },
+  {
+    v: 2,
+    key: {
+      _fts: 'text',
+      _ftsx: 1
+    },
+    name: 'course_text_idx',
+    weights: {
+      course_name: 1,
+      description: 1,
+      'metadata.tags': 1
+    },
+    default_language: 'english',
+    language_override: 'language',
+    textIndexVersion: 3
+  }
+]
+Warning: NumberLong: specifying a number as argument is deprecated and may lead to loss of precision, pass a string instead
+Warning: NumberLong: specifying a number as argument is deprecated and may lead to loss of precision, pass a string instead
+Warning: NumberLong: specifying a number as argument is deprecated and may lead to loss of precision, pass a string instead
+Warning: NumberLong: specifying a number as argument is deprecated and may lead to loss of precision, pass a string instead
+Seed counts:
+student_profiles = 3
+course_catalogs   = 3
+
+=== CRUD DEMO ===
+READ: Find one student by reg_no
+{
+  _id: ObjectId('695d406220beefb5ec8de669'),
+  student_id: 1,
+  reg_no: 'AIU/PG/0001/25',
+  name: {
+    first: 'Clive',
+    last: 'Aono'
+  },
+  email: 'clive.aono@aiu.ac.ke',
+  department_name: 'Computing',
+  status: 'active',
+  extracurricular_activities: [
+    {
+      name: 'AI Club',
+      role: 'Member',
+      hours_per_week: 3,
+      achievements: [
+        'Hackathon finalist'
+      ]
+    }
+  ],
+  preferences: {
+    notifications: {
+      email: true,
+      sms: false,
+      push: true
+    },
+    ui: {
+      theme: 'dark',
+      language: 'en'
+    },
+    interests: [
+      'databases',
+      'security',
+      'ai'
+    ]
+  },
+  enrollments: [
+    {
+      course_code: 'CS501',
+      course_name: 'Advanced Database Systems',
+      status: 'enrolled',
+      performance: null
+    }
+  ],
+  activity_summary: {
+    total_actions: 120,
+    total_seconds: 5400,
+    last_activity_at: ISODate('2026-01-06T17:03:30.129Z'),
+    engagement_score_30d: 72.5
+  },
+  created_at: ISODate('2026-01-06T17:03:30.129Z')
+}
+UPDATE ($inc): Increment total_actions +5 and total_seconds +300 for student_id=1
+{
+  student_id: 1,
+  activity_summary: {
+    total_actions: 125,
+    total_seconds: 5700
+  }
+}
+UPDATE ($set): Set UI theme to light for student_id=1
+UPDATE ($push): Add a new extracurricular activity for student_id=2
+CREATE (upsert): Insert a new student if missing (student_id=4)
+student_profiles = 4
+DELETE: Remove the upserted demo student_id=4
+student_profiles = 3
+
+=== AGGREGATION DEMO ($match/$group/$project) ===
+[
+  {
+    students: 1,
+    department_name: 'Computing',
+    avg_engagement_30d: 72.5
+  },
+  {
+    students: 1,
+    department_name: 'Business',
+    avg_engagement_30d: 55.25
+  },
+  {
+    students: 1,
+    department_name: 'Humanities',
+    avg_engagement_30d: 31
+  }
+]
+
+=== TEXT SEARCH DEMO ===
+Search for: 'indexing transactions'
+[
+  {
+    course_code: 'CS501',
+    course_name: 'Advanced Database Systems'
+  }
+]
+
+=== INDEX INVENTORY (proof) ===
+student_profiles indexes:
+[
+  {
+    v: 2,
+    key: {
+      _id: 1
+    },
+    name: '_id_'
+  },
+  {
+    v: 2,
+    key: {
+      student_id: 1
+    },
+    name: 'student_id_1',
+    unique: true
+  },
+  {
+    v: 2,
+    key: {
+      reg_no: 1
+    },
+    name: 'reg_no_1',
+    unique: true
+  },
+  {
+    v: 2,
+    key: {
+      department_name: 1,
+      status: 1
+    },
+    name: 'department_name_1_status_1'
+  },
+  {
+    v: 2,
+    key: {
+      'activity_summary.last_activity_at': -1
+    },
+    name: 'activity_summary.last_activity_at_-1'
+  }
+]
+course_catalogs indexes:
+[
+  {
+    v: 2,
+    key: {
+      _id: 1
+    },
+    name: '_id_'
+  },
+  {
+    v: 2,
+    key: {
+      course_code: 1
+    },
+    name: 'course_code_1',
+    unique: true
+  },
+  {
+    v: 2,
+    key: {
+      department_name: 1,
+      credits: 1
+    },
+    name: 'department_name_1_credits_1'
+  },
+  {
+    v: 2,
+    key: {
+      _fts: 'text',
+      _ftsx: 1
+    },
+    name: 'course_text_idx',
+    weights: {
+      course_name: 1,
+      description: 1,
+      'metadata.tags': 1
+    },
+    default_language: 'english',
+    language_override: 'language',
+    textIndexVersion: 3
+  }
+]
+
+=== B1 END ===

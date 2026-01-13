@@ -1,0 +1,109 @@
+﻿erDiagram
+  DEPARTMENTS ||--o{ STUDENTS : has
+  DEPARTMENTS ||--o{ LECTURERS : employs
+  DEPARTMENTS ||--o{ COURSES : offers
+  LECTURERS ||--o{ COURSES : teaches
+  STUDENTS ||--o{ ENROLLMENTS : enrolls
+  COURSES ||--o{ ENROLLMENTS : includes
+  STUDENTS ||--o{ STUDENT_COURSE_PERFORMANCE : has
+  COURSES ||--o{ STUDENT_COURSE_PERFORMANCE : measures
+  COURSES ||--o{ MATERIALS : contains
+  STUDENTS ||--o{ ACTIVITY_LOGS : generates
+  ROOMS ||--o{ SENSORS : contains
+  SENSORS ||--o{ SENSOR_READINGS : produces
+
+  DEPARTMENTS {
+    int department_id PK
+    varchar name UK
+  }
+
+  ROOMS {
+    int room_id PK
+    varchar room_code UK
+    varchar building
+    int capacity
+  }
+
+  LECTURERS {
+    int lecturer_id PK
+    int department_id FK
+    varchar first_name
+    varchar last_name
+    varchar email UK
+    timestamp created_at
+  }
+
+  STUDENTS {
+    int student_id PK
+    int department_id FK
+    varchar reg_no UK
+    varchar first_name
+    varchar last_name
+    varchar email UK
+    year enrollment_year
+    varchar status
+    timestamp created_at
+  }
+
+  COURSES {
+    int course_id PK
+    int department_id FK
+    int lecturer_id FK
+    varchar course_code UK
+    varchar course_name
+    tinyint credits
+    timestamp created_at
+  }
+
+  ENROLLMENTS {
+    int student_id PK, FK
+    int course_id PK, FK
+    datetime enrolled_at
+    varchar status
+  }
+
+  STUDENT_COURSE_PERFORMANCE {
+    int student_id PK, FK
+    int course_id PK, FK
+    decimal continuous_assessment
+    decimal exam_score
+    decimal final_score
+    char grade_letter
+    timestamp updated_at
+  }
+
+  MATERIALS {
+    bigint id PK
+    int course_id FK
+    varchar file_name
+    varchar file_type
+    datetime upload_date
+    varchar file_path
+    bigint file_size
+  }
+
+  ACTIVITY_LOGS {
+    bigint id PK
+    int student_id FK
+    varchar activity_type
+    bigint resource_id
+    datetime timestamp
+    int session_duration
+    varchar ip_address
+  }
+
+  SENSORS {
+    int sensor_id PK
+    int room_id FK
+    varchar sensor_type
+    varchar manufacturer
+    date installation_date
+  }
+
+  SENSOR_READINGS {
+    bigint id PK
+    int sensor_id FK
+    decimal value
+    datetime timestamp
+    varchar status
+  }

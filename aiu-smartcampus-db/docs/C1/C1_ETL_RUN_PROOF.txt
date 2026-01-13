@@ -1,0 +1,12 @@
+﻿=== C1 ETL START ===
+--- ETL RESULT ---
+MySQL db=aiu_urms_ext departments=4 students=200 activity_logs=2012
+Mongo student_profiles=4
+ClickHouse sensor_readings_raw=2900
+Neo4j Students=4 Clubs=4
+--- BATCH STATS ---
+student_profiles ok=4 bad=0
+activity_logs    ok=6 bad=0
+sensor_readings  ok=6 bad=0
+club_memberships ok=4 bad=0
+=== C1 ETL END ===

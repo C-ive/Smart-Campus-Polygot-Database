@@ -1,0 +1,4 @@
+﻿mv_sensor_readings_hourly
+sensor_readings_hourly
+sensor_readings_raw
+sensors_dim

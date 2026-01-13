@@ -1,0 +1,11 @@
+2026-01-06 21:00:42,121 [INFO] Connecting to ClickHouse http://clickhouse:8123 as ch_admin
+2026-01-06 21:00:42,453 [INFO] Reset requested: TRUNCATE raw + hourly tables
+2026-01-06 21:00:42,553 [ERROR] Ingestion failed: int() argument must be a string, a bytes-like object or a real number, not 'dict'
+Traceback (most recent call last):
+  File "/work/clickhouse/scripts/B2_ingest.py", line 171, in main
+    sensors = ensure_sensors_dim(client, logger)
+              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/work/clickhouse/scripts/B2_ingest.py", line 82, in ensure_sensors_dim
+    if n and int(n) > 0:
+             ^^^^^^
+TypeError: int() argument must be a string, a bytes-like object or a real number, not 'dict'
